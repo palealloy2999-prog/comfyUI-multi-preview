@@ -89,8 +89,13 @@ function createControlPanel(node) {
     // Initialize buttons object if needed
     node.multipreviewState.buttons = {};
     
-    // Create buttons for each input pin
+    // Create buttons for each input pin (skip last if it's columns)
     inputs.forEach((input, index) => {
+        // Skip non-IMAGE inputs
+        if (!input.type || !input.type.toString().includes("IMAGE")) {
+            return;
+        }
+        
         const pinNumber = index + 1;
         const pinLabel = input.name || `pin_${index}`;
         
@@ -173,9 +178,15 @@ function monitorInputs(node) {
     // Check for existing input monitors
     const checkInputs = () => {
         const inputs = node.inputs || [];
+        let imageIndex = 1;
         
         inputs.forEach((input, index) => {
-            const pinNumber = index + 1;
+            // Only track IMAGE type inputs
+            if (!input.type || !input.type.toString().includes("IMAGE")) {
+                return;
+            }
+            
+            const pinNumber = imageIndex;
             const hasInput = input.link !== null && input.link !== undefined;
             
             // Update button state
@@ -183,6 +194,8 @@ function monitorInputs(node) {
             if (buttonState) {
                 updateButtonState(node, pinNumber, hasInput);
             }
+            
+            imageIndex++;
         });
     };
     
@@ -257,11 +270,18 @@ function updateButtonStates(node) {
     if (!node.multipreviewState) return;
     
     const inputs = node.inputs || [];
+    let imageIndex = 1;
     
     inputs.forEach((input, index) => {
-        const pinNumber = index + 1;
+        // Only track IMAGE type inputs
+        if (!input.type || !input.type.toString().includes("IMAGE")) {
+            return;
+        }
+        
+        const pinNumber = imageIndex;
         const hasInput = input.link !== null && input.link !== undefined;
         
         updateButtonState(node, pinNumber, hasInput);
+        imageIndex++;
     });
 }

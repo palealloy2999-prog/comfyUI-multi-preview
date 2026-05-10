@@ -4,7 +4,37 @@ MultiPreviewNode - Display multiple images in a grid preview
 
 import numpy as np
 from PIL import Image
-import io
+
+
+class AnyType(str):
+    """A special class that is always equal in not equal comparisons."""
+    
+    def __ne__(self, __value: object) -> bool:
+        return False
+
+
+class FlexibleOptionalInputType(dict):
+    """A special class to make flexible nodes with dynamic number of inputs."""
+    
+    def __init__(self, type_str, data=None):
+        self.type = type_str
+        self.data = data
+        if self.data is not None:
+            for k, v in self.data.items():
+                self[k] = v
+    
+    def __getitem__(self, key):
+        if self.data is not None and key in self.data:
+            val = self.data[key]
+            return val
+        return (self.type,)
+    
+    def __contains__(self, key):
+        """Always contain a key, and we'll always return the tuple above when asked for it."""
+        return True
+
+
+any_type = AnyType("*")
 
 
 class MultiPreviewNode:
@@ -22,17 +52,7 @@ class MultiPreviewNode:
             "required": {
                 "image1": ("IMAGE",),
             },
-            "optional": {
-                "image2": ("IMAGE",),
-                "image3": ("IMAGE",),
-                "image4": ("IMAGE",),
-                "image5": ("IMAGE",),
-                "image6": ("IMAGE",),
-                "image7": ("IMAGE",),
-                "image8": ("IMAGE",),
-                "image9": ("IMAGE",),
-                "columns": ("INT", {"default": 3, "min": 1, "max": 9}),
-            }
+            "optional": FlexibleOptionalInputType("IMAGE"),
         }
     
     RETURN_TYPES = ("IMAGE",)
@@ -41,18 +61,16 @@ class MultiPreviewNode:
     CATEGORY = "image"
     OUTPUT_NODE = True
     
-    def preview_images(self, image1, image2=None, image3=None, image4=None, 
-                      image5=None, image6=None, image7=None, image8=None, 
-                      image9=None, columns=3):
+    def preview_images(self, image1, columns=3, **kwargs):
         """
         Combine and display multiple preview images
         """
-        images = []
+        images = [image1]
         
-        # Collect all images that were provided
-        for img in [image1, image2, image3, image4, image5, image6, image7, image8, image9]:
-            if img is not None:
-                images.append(img)
+        # Collect all optional image inputs
+        for key in sorted(kwargs.keys()):
+            if key.startswith("image") and kwargs[key] is not None:
+                images.append(kwargs[key])
         
         if not images:
             raise ValueError("At least image1 must be provided")
