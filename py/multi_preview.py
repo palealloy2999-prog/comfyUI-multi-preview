@@ -42,10 +42,6 @@ class MultiPreviewNode:
     A node that displays multiple preview images in a grid layout
     """
     
-    def __init__(self):
-        self.outputs = ["IMAGE"]
-        self.output_node = True
-    
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -55,19 +51,17 @@ class MultiPreviewNode:
             "optional": FlexibleOptionalInputType("IMAGE"),
         }
     
-    RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("image",)
+    RETURN_TYPES = ()
+    RETURN_NAMES = ()
     FUNCTION = "preview_images"
     CATEGORY = "image"
-    OUTPUT_NODE = True
     
-    def preview_images(self, image1, columns=3, **kwargs):
+    def preview_images(self, image1, **kwargs):
         """
         Combine and display multiple preview images
         """
         images = [image1]
         
-        # Collect all optional image inputs
         for key in sorted(kwargs.keys()):
             if key.startswith("image") and kwargs[key] is not None:
                 images.append(kwargs[key])
