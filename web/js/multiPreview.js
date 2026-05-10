@@ -5,19 +5,6 @@
 
 import { app } from "../../scripts/app.js";
 
-const MAX_IMAGES = 9;
-const PIN_LABELS = {
-    0: "image1",
-    1: "image2",
-    2: "image3",
-    3: "image4",
-    4: "image5",
-    5: "image6",
-    6: "image7",
-    7: "image8",
-    8: "image9",
-};
-
 app.registerExtension({
     name: "comfyui.multipreview",
     async setup() {
@@ -35,11 +22,33 @@ app.registerExtension({
                 node.multipreviewState = {
                     buttons: {},
                     selectedPin: null,
+                    lastInputCount: 0,
                 };
             }
             
-            // Create control panel
+            // Create initial control panel
             createControlPanel(node);
+            
+            // Monitor for connection changes
+            const originalOnConnectionsChange = node.onConnectionsChange;
+            node.onConnectionsChange = function() {
+                if (originalOnConnectionsChange) {
+                    originalOnConnectionsChange.call(this);
+                }
+                // Rebuild panel if input count changed
+                setTimeout(() => {
+                    if (node.inputs && node.inputs.length !== node.multipreviewState.lastInputCount) {
+                        node.multipreviewState.lastInputCount = node.inputs.length;
+                        // Remove old panel
+                        const oldPanel = document.getElementById(`multipreview-panel-${node.id}`);
+                        if (oldPanel) oldPanel.remove();
+                        node.multipreviewPanel = null;
+                        // Create new panel
+                        createControlPanel(node);
+                    }
+                    monitorInputs(node);
+                }, 50);
+            };
             
             // Monitor input connections
             monitorInputs(node);
@@ -57,9 +66,13 @@ app.registerExtension({
 });
 
 /**
- * Create the control panel with numbered buttons
+ * Create the control panel with numbered buttons based on input count
  */
 function createControlPanel(node) {
+    // Get number of inputs
+    const inputs = node.inputs || [];
+    if (inputs.length === 0) return; // No inputs, don't create panel
+    
     // Create container div
     const container = document.createElement("div");
     container.id = `multipreview-panel-${node.id}`;
@@ -73,15 +86,19 @@ function createControlPanel(node) {
         flex-wrap: wrap;
     `;
     
-    // Create buttons for each pin
-    for (let i = 0; i < MAX_IMAGES; i++) {
-        const button = document.createElement("button");
-        const pinNumber = i + 1;
+    // Initialize buttons object if needed
+    node.multipreviewState.buttons = {};
+    
+    // Create buttons for each input pin
+    inputs.forEach((input, index) => {
+        const pinNumber = index + 1;
+        const pinLabel = input.name || `pin_${index}`;
         
+        const button = document.createElement("button");
         button.id = `multipreview-btn-${node.id}-${pinNumber}`;
         button.textContent = pinNumber.toString();
         button.dataset.pinNumber = pinNumber;
-        button.dataset.pinLabel = PIN_LABELS[i];
+        button.dataset.pinLabel = pinLabel;
         
         button.style.cssText = `
             min-width: 32px;
@@ -131,10 +148,11 @@ function createControlPanel(node) {
             element: button,
             enabled: false,
             active: false,
+            label: pinLabel,
         };
         
         container.appendChild(button);
-    }
+    });
     
     // Add the panel to the node
     if (!node.multipreviewPanel) {
@@ -156,33 +174,20 @@ function monitorInputs(node) {
     const checkInputs = () => {
         const inputs = node.inputs || [];
         
-        for (let i = 0; i < MAX_IMAGES; i++) {
-            const pinNumber = i + 1;
-            const pinLabel = PIN_LABELS[i];
-            
-            // Find the input by label
-            const inputIndex = inputs.findIndex(input => input.name === pinLabel);
-            const hasInput = inputIndex !== -1 && inputs[inputIndex].link !== null;
+        inputs.forEach((input, index) => {
+            const pinNumber = index + 1;
+            const hasInput = input.link !== null && input.link !== undefined;
             
             // Update button state
             const buttonState = node.multipreviewState.buttons[pinNumber];
             if (buttonState) {
                 updateButtonState(node, pinNumber, hasInput);
             }
-        }
+        });
     };
     
     // Check inputs initially
     checkInputs();
-    
-    // Re-check when connections change
-    const originalOnConnectionsChange = node.onConnectionsChange;
-    node.onConnectionsChange = function() {
-        if (originalOnConnectionsChange) {
-            originalOnConnectionsChange.call(this);
-        }
-        checkInputs();
-    };
 }
 
 /**
@@ -227,10 +232,9 @@ function selectPin(node, pinNumber) {
     node.multipreviewState.selectedPin = pinNumber;
     
     // Update all button states
-    for (let i = 1; i <= MAX_IMAGES; i++) {
-        const buttonState = node.multipreviewState.buttons[i];
+    Object.entries(node.multipreviewState.buttons).forEach(([num, buttonState]) => {
         if (buttonState && buttonState.enabled) {
-            if (i === pinNumber) {
+            if (parseInt(num) === pinNumber) {
                 buttonState.element.style.background = "#4a90e2";
                 buttonState.element.style.borderColor = "#5a9fef";
             } else {
@@ -238,7 +242,7 @@ function selectPin(node, pinNumber) {
                 buttonState.element.style.borderColor = "#555";
             }
         }
-    }
+    });
     
     // Trigger any custom behavior if needed
     if (node.onPinSelected) {
@@ -254,13 +258,10 @@ function updateButtonStates(node) {
     
     const inputs = node.inputs || [];
     
-    for (let i = 0; i < MAX_IMAGES; i++) {
-        const pinNumber = i + 1;
-        const pinLabel = PIN_LABELS[i];
-        
-        const inputIndex = inputs.findIndex(input => input.name === pinLabel);
-        const hasInput = inputIndex !== -1 && inputs[inputIndex].link !== null;
+    inputs.forEach((input, index) => {
+        const pinNumber = index + 1;
+        const hasInput = input.link !== null && input.link !== undefined;
         
         updateButtonState(node, pinNumber, hasInput);
-    }
+    });
 }
