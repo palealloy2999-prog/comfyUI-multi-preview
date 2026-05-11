@@ -12,143 +12,228 @@ app.registerExtension({
             return;
         }
 
-        // Initialize node state
+        // Initialize state
         if (!node.multipreviewState) {
             node.multipreviewState = {
                 buttons: {},
                 selectedPin: 1,
-                imageCount: 0,
+                previewData: null,
+                previewCanvas: null,
             };
         }
 
-        // Create control panel container
-        const panelContainer = document.createElement("div");
-        panelContainer.id = `multipreview-panel-${node.id}`;
-        panelContainer.style.cssText = `
-            display: flex;
-            gap: 5px;
-            padding: 8px;
-            background: #2a2a2a;
-            border-radius: 4px;
-            margin-top: 8px;
-            flex-wrap: wrap;
-            align-items: center;
-        `;
-
-        // Count image inputs (image1 through image8 from INPUT_TYPES)
-        const maxImages = 8;
-        for (let i = 1; i <= maxImages; i++) {
-            const inputName = `image${i}`;
-            const button = document.createElement("button");
-            button.id = `multipreview-btn-${node.id}-${i}`;
-            button.textContent = i.toString();
-            button.dataset.imageIndex = i;
-            button.style.cssText = `
-                min-width: 32px;
-                height: 32px;
-                padding: 0;
-                border: 1px solid #555;
-                border-radius: 3px;
-                background: #3a3a3a;
-                color: #888;
-                font-weight: bold;
-                cursor: not-allowed;
-                transition: all 0.2s ease;
-                font-size: 12px;
-            `;
-            button.disabled = true;
-
-            button.addEventListener("click", (e) => {
-                e.preventDefault();
-                if (!button.disabled) {
-                    node.multipreviewState.selectedPin = i;
-                    updateAllButtonStates(node);
-                }
-            });
-
-            button.addEventListener("mouseenter", () => {
-                if (!button.disabled) {
-                    button.style.background = "#4a4a4a";
-                    button.style.borderColor = "#777";
-                }
-            });
-
-            button.addEventListener("mouseleave", () => {
-                if (!button.disabled) {
-                    if (node.multipreviewState.selectedPin === i) {
-                        button.style.background = "#4a90e2";
-                        button.style.borderColor = "#5a9fef";
-                    } else {
-                        button.style.background = "#3a3a3a";
-                        button.style.borderColor = "#555";
-                    }
-                }
-            });
-
-            node.multipreviewState.buttons[i] = {
-                element: button,
-                enabled: false,
-            };
-            panelContainer.appendChild(button);
+        // Ensure initial image input exists
+        if (!getImageInputs(node).length) {
+            addImageInput(node);
         }
 
-        // Add panel as DOM widget
-        const widget = node.addDOMWidget("preview_panel", "multi_preview_panel", panelContainer, {
-            serialize: false,
-            hideOnZoom: false,
-        });
+        // Create UI elements
+        createControlPanel(node);
+        createPreviewCanvas(node);
 
-        // Override onConnectionsChange to track which inputs have connections
+        // Override onConnectionsChange to handle dynamic input growth
         const originalOnConnectionsChange = node.onConnectionsChange;
         node.onConnectionsChange = function(type, slotIndex, connected, link_info, ioSlot) {
             if (originalOnConnectionsChange) {
                 originalOnConnectionsChange.call(this, type, slotIndex, connected, link_info, ioSlot);
             }
-            
-            // Update button states based on connections
+
+            // type === 1 means input connection
+            if (type === 1) {
+                const input = this.inputs?.[slotIndex];
+                if (input && isImageInput(input)) {
+                    if (connected) {
+                        // Last image input was connected - add new trailing empty input
+                        ensureTrailingEmptyInput(this);
+                    } else {
+                        // Input disconnected - remove unused trailing inputs
+                        removeUnusedTrailingInputs(this);
+                    }
+                }
+            }
+
+            // Refresh UI
+            refreshControlPanel(this);
             updateButtonStates(this);
         };
 
-        // Handle node execution - button state updates
+        // Handle node execution - refresh preview image
         const originalOnExecuted = node.onExecuted;
-        node.onExecuted = function(message) {
+        node.onExecuted = function(output) {
             if (originalOnExecuted) {
-                originalOnExecuted.call(this, message);
+                originalOnExecuted.call(this, output);
             }
             
-            // Update button availability based on which inputs are connected
-            updateButtonStates(this);
+            // Store preview data for display
+            node.multipreviewState.previewData = output;
+            displayPreviewImage(this, output);
         };
 
-        // Initial button state update
+        // Initial UI update
         updateButtonStates(node);
     }
 });
 
+// ==================== Helper Functions ====================
+
+function isImageInput(input) {
+    return input && typeof input.name === 'string' && input.name.startsWith('image');
+}
+
+function getImageInputs(node) {
+    return (node.inputs || []).filter(isImageInput);
+}
+
+function getImageInputIndex(inputName) {
+    // Extract number from "image1", "image2", etc.
+    const match = inputName.match(/^image(\d+)$/);
+    return match ? parseInt(match[1], 10) : 0;
+}
+
+function addImageInput(node) {
+    const inputs = getImageInputs(node);
+    const nextIndex = inputs.length + 1;
+    node.addInput(`image${nextIndex}`, "IMAGE");
+}
+
+function ensureTrailingEmptyInput(node) {
+    const inputs = getImageInputs(node);
+    if (!inputs.length) {
+        addImageInput(node);
+        return;
+    }
+
+    const lastInput = inputs[inputs.length - 1];
+    // If last input is connected, add new empty input
+    if (lastInput.link !== null && lastInput.link !== undefined) {
+        addImageInput(node);
+    }
+}
+
+function removeUnusedTrailingInputs(node) {
+    const inputs = getImageInputs(node);
+    // Remove trailing unconnected inputs (but keep at least one)
+    for (let i = inputs.length - 1; i > 0; i--) {
+        const input = inputs[i];
+        if (!input.link) {
+            const slotIndex = node.inputs.indexOf(input);
+            if (slotIndex >= 0) {
+                node.removeInput(slotIndex);
+            }
+        } else {
+            break; // Stop at first connected input
+        }
+    }
+}
+
+// ==================== UI Panel Functions ====================
+
+function createControlPanel(node) {
+    // Remove existing panel if any
+    const existing = document.getElementById(`multipreview-buttons-${node.id}`);
+    if (existing) {
+        existing.remove();
+    }
+
+    const panelContainer = document.createElement("div");
+    panelContainer.id = `multipreview-buttons-${node.id}`;
+    panelContainer.style.cssText = `
+        display: flex;
+        gap: 5px;
+        padding: 8px;
+        background: #2a2a2a;
+        border-radius: 4px;
+        margin-bottom: 8px;
+        flex-wrap: wrap;
+        align-items: center;
+    `;
+
+    node.multipreviewState.buttons = {};
+
+    const imageInputs = getImageInputs(node);
+    imageInputs.forEach((input, idx) => {
+        const pinNumber = getImageInputIndex(input.name);
+        const button = document.createElement("button");
+        button.id = `multipreview-btn-${node.id}-${pinNumber}`;
+        button.textContent = pinNumber.toString();
+        button.dataset.pinNumber = pinNumber;
+        button.style.cssText = `
+            min-width: 32px;
+            height: 32px;
+            padding: 0;
+            border: 1px solid #555;
+            border-radius: 3px;
+            background: #3a3a3a;
+            color: #888;
+            font-weight: bold;
+            cursor: not-allowed;
+            transition: all 0.2s ease;
+            font-size: 12px;
+        `;
+        button.disabled = true;
+
+        button.addEventListener("click", (e) => {
+            e.preventDefault();
+            if (!button.disabled) {
+                node.multipreviewState.selectedPin = pinNumber;
+                updateButtonStates(node);
+                displayPreviewImage(node, node.multipreviewState.previewData);
+            }
+        });
+
+        button.addEventListener("mouseenter", () => {
+            if (!button.disabled) {
+                button.style.background = "#4a4a4a";
+                button.style.borderColor = "#777";
+            }
+        });
+
+        button.addEventListener("mouseleave", () => {
+            if (!button.disabled) {
+                if (node.multipreviewState.selectedPin === pinNumber) {
+                    button.style.background = "#4a90e2";
+                    button.style.borderColor = "#5a9fef";
+                } else {
+                    button.style.background = "#3a3a3a";
+                    button.style.borderColor = "#555";
+                }
+            }
+        });
+
+        node.multipreviewState.buttons[pinNumber] = {
+            element: button,
+        };
+        panelContainer.appendChild(button);
+    });
+
+    // Add as DOM widget
+    node.addDOMWidget("preview_buttons", "preview_buttons", panelContainer, {
+        serialize: false,
+        hideOnZoom: false,
+    });
+}
+
+function refreshControlPanel(node) {
+    createControlPanel(node);
+}
+
 function updateButtonStates(node) {
-    let connectedCount = 0;
+    const imageInputs = getImageInputs(node);
     
-    // Check which image inputs have connections
-    for (let i = 1; i <= 8; i++) {
-        const inputSlot = node.inputs?.find(inp => inp.name === `image${i}`);
-        const hasConnection = inputSlot && (inputSlot.link !== null && inputSlot.link !== undefined);
-        
-        const button = node.multipreviewState.buttons[i];
-        if (!button) continue;
-        
+    imageInputs.forEach((input) => {
+        const pinNumber = getImageInputIndex(input.name);
+        const button = node.multipreviewState.buttons[pinNumber];
+        if (!button) return;
+
+        const hasConnection = input.link !== null && input.link !== undefined;
+        const isSelected = node.multipreviewState.selectedPin === pinNumber;
+
         if (hasConnection) {
-            connectedCount++;
             button.element.disabled = false;
             button.element.style.color = "#fff";
             button.element.style.cursor = "pointer";
-            
-            if (node.multipreviewState.selectedPin === i) {
-                button.element.style.background = "#4a90e2";
-                button.element.style.borderColor = "#5a9fef";
-            } else {
-                button.element.style.background = "#3a3a3a";
-                button.element.style.borderColor = "#555";
-            }
+            button.element.style.background = isSelected ? "#4a90e2" : "#3a3a3a";
+            button.element.style.borderColor = isSelected ? "#5a9fef" : "#555";
         } else {
             button.element.disabled = true;
             button.element.style.background = "#3a3a3a";
@@ -156,7 +241,73 @@ function updateButtonStates(node) {
             button.element.style.color = "#888";
             button.element.style.cursor = "not-allowed";
         }
+    });
+}
+
+// ==================== Preview Canvas Functions ====================
+
+function createPreviewCanvas(node) {
+    const canvasContainer = document.createElement("div");
+    canvasContainer.id = `multipreview-canvas-${node.id}`;
+    canvasContainer.style.cssText = `
+        width: 100%;
+        min-height: 200px;
+        background: #1a1a1a;
+        border: 1px solid #444;
+        border-radius: 4px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin-top: 8px;
+    `;
+
+    const canvas = document.createElement("canvas");
+    canvas.id = `multipreview-canvas-element-${node.id}`;
+    canvas.style.cssText = `
+        max-width: 100%;
+        max-height: 100%;
+        object-fit: contain;
+    `;
+
+    canvasContainer.appendChild(canvas);
+    node.multipreviewState.previewCanvas = canvas;
+
+    node.addDOMWidget("preview_canvas", "preview_canvas", canvasContainer, {
+        serialize: false,
+        hideOnZoom: false,
+        getMinHeight: () => 200,
+    });
+}
+
+function displayPreviewImage(node, outputData) {
+    if (!outputData || !node.multipreviewState.previewCanvas) {
+        return;
     }
-    
-    node.multipreviewState.imageCount = connectedCount;
+
+    const selectedPin = node.multipreviewState.selectedPin;
+    const imageKey = `image${selectedPin}`;
+
+    // Output data is keyed by input name (e.g., "image1", "image2", etc.)
+    const images = outputData[imageKey];
+    if (!images || !images[0]) {
+        return;
+    }
+
+    const imageData = images[0]; // First image in batch
+    if (!imageData) {
+        return;
+    }
+
+    const canvas = node.multipreviewState.previewCanvas;
+    canvas.width = imageData.width || 512;
+    canvas.height = imageData.height || 512;
+
+    const ctx = canvas.getContext("2d");
+    const imageArray = new Uint8ClampedArray(imageData.data);
+    const imgData = ctx.createImageData(
+        canvas.width,
+        canvas.height
+    );
+    imgData.data.set(imageArray);
+    ctx.putImageData(imgData, 0, 0);
 }

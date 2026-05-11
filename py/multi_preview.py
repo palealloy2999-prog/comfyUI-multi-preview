@@ -1,17 +1,34 @@
 """
-MultiPreviewNode - Display multiple images with a grid preview interface
+MultiPreviewNode - Display multiple images with dynamic pin count
+Supports flexible optional image inputs for preview-only display.
 """
+
+
+class FlexibleOptionalImageType(dict):
+    """
+    Special type for flexible optional inputs.
+    Allows ComfyUI to dynamically accept image inputs.
+    """
+    
+    def __init__(self):
+        super().__init__()
+        self.type = "IMAGE"
+    
+    def __getitem__(self, key):
+        # Always return IMAGE type for any key
+        return (self.type,)
+    
+    def __contains__(self, key):
+        # Always return True for any key
+        return True
 
 
 class MultiPreviewNode:
     """
-    A node that displays multiple preview images in a grid layout.
-    This is a preview-only node that accepts multiple image inputs
-    and displays them with a control panel in the UI.
+    A preview-only node that displays a single image from multiple inputs.
+    Users can switch between connected images using UI buttons.
+    Dynamically grows input pins as needed.
     """
-    
-    def __init__(self):
-        pass
     
     @classmethod
     def INPUT_TYPES(cls):
@@ -19,15 +36,7 @@ class MultiPreviewNode:
             "required": {
                 "image1": ("IMAGE",),
             },
-            "optional": {
-                "image2": ("IMAGE",),
-                "image3": ("IMAGE",),
-                "image4": ("IMAGE",),
-                "image5": ("IMAGE",),
-                "image6": ("IMAGE",),
-                "image7": ("IMAGE",),
-                "image8": ("IMAGE",),
-            },
+            "optional": FlexibleOptionalImageType(),
         }
     
     RETURN_TYPES = ()
@@ -38,7 +47,8 @@ class MultiPreviewNode:
     
     def preview_images(self, image1, **kwargs):
         """
-        Preview multiple images. This function does not return anything
-        as it is a preview-only node. Image display is handled by the UI extension.
+        Preview images. This is a display-only node.
+        Actual image display is handled by the JS UI extension.
         """
         return None
+
