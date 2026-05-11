@@ -1,299 +1,219 @@
 import { app } from "../../scripts/app.js";
 
+// ==================== Extension ====================
+
 app.registerExtension({
     name: "comfyui.multipreview",
-    
-    async setup() {
-        // Setup complete
-    },
-    
-    async loadedGraphNode(node, app) {
-        if (node.type !== "MultiPreview") {
-            return;
-        }
 
-        // Initialize state
-        if (!node.multipreviewState) {
-            node.multipreviewState = {
-                buttons: {},
-                selectedPin: 1,
-                previewData: null,
-                previewCanvas: null,
-            };
-        }
+    // beforeRegisterNodeDef でプロトタイプに仕込む方法が最も確実。
+    // nodeCreated より前に呼ばれ、全インスタンスに適用される。
+    async beforeRegisterNodeDef(nodeType, nodeData, app) {
+        if (nodeData.name !== "MultiPreview") return;
 
-        // Create UI elements
-        createControlPanel(node);
-        createPreviewCanvas(node);
+        // --- onConnectionsChange をプロトタイプレベルで拡張 ---
+        const origOnConnectionsChange = nodeType.prototype.onConnectionsChange;
+        nodeType.prototype.onConnectionsChange = function (type, index, connected, link_info) {
+            // 元の処理を先に呼ぶ
+            origOnConnectionsChange?.apply(this, arguments);
 
-        // Ensure at least image1 and image2 exist
-        ensureMinimumInputs(node);
-
-        // Override onConnectionsChange to handle dynamic input growth
-        const originalOnConnectionsChange = node.onConnectionsChange;
-        node.onConnectionsChange = function(type, slotIndex, connected, link_info, ioSlot) {
-            if (originalOnConnectionsChange) {
-                originalOnConnectionsChange.call(this, type, slotIndex, connected, link_info, ioSlot);
-            }
-
-            // type === 1 means input connection
+            // type=1 がINPUT側の変化
             if (type === 1) {
-                const input = this.inputs?.[slotIndex];
-                if (input && isImageInput(input)) {
-                    if (connected) {
-                        // Last image input was connected - add new trailing empty input
-                        ensureTrailingEmptyInput(this);
-                    } else {
-                        // Input disconnected - remove unused trailing inputs
-                        removeUnusedTrailingInputs(this);
-                    }
-                }
+                updateDynamicInputs(this);
+                rebuildButtons(this);
+                updateButtonStates(this);
             }
+        };
 
-            // Refresh UI
-            refreshControlPanel(this);
+        // --- onExecuted をプロトタイプレベルで拡張 ---
+        const origOnExecuted = nodeType.prototype.onExecuted;
+        nodeType.prototype.onExecuted = function (output) {
+            origOnExecuted?.apply(this, arguments);
+            const images = output?.images ?? [];
+            this._mpImages = images;
+            showImage(this, this._mpSelectedPin ?? 1);
             updateButtonStates(this);
         };
+    },
 
-        // Handle node execution - refresh preview image
-        const originalOnExecuted = node.onExecuted;
-        node.onExecuted = function(output) {
-            if (originalOnExecuted) {
-                originalOnExecuted.call(this, output);
-            }
-            
-            console.log("[MultiPreview] onExecuted called with output:", output);
-            
-            // Store preview data for display
-            if (output) {
-                node.multipreviewState.previewData = output;
-                displayPreviewImage(this, output);
-            }
-        };
+    // nodeCreated でDOMウィジェットを追加し、初期ピンを保証する
+    async nodeCreated(node) {
+        if (node.constructor.type !== "MultiPreview") return;
 
-        // Initial UI update
+        // 状態の初期化
+        node._mpSelectedPin = 1;
+        node._mpImages = [];
+
+        // DOMウィジェット追加
+        createButtonPanel(node);
+        createPreviewPanel(node);
+
+        // 最低2つの入力ピンを保証
+        ensureMinimumInputs(node);
+
+        // 初期ボタン構築
+        rebuildButtons(node);
         updateButtonStates(node);
-    }
+    },
 });
 
-// ==================== Helper Functions ====================
+// ==================== Input Pin Management ====================
 
 function isImageInput(input) {
-    return input && typeof input.name === 'string' && input.name.startsWith('image');
+    return input && /^image\d+$/.test(input.name);
 }
 
 function getImageInputs(node) {
     return (node.inputs || []).filter(isImageInput);
 }
 
-function getImageInputIndex(inputName) {
-    // Extract number from "image1", "image2", etc.
-    const match = inputName.match(/^image(\d+)$/);
-    return match ? parseInt(match[1], 10) : 0;
+function getPinNumber(inputName) {
+    const m = inputName.match(/^image(\d+)$/);
+    return m ? parseInt(m[1], 10) : 0;
 }
 
 function ensureMinimumInputs(node) {
-    const inputs = getImageInputs(node);
-    // Ensure we have at least image1 and image2
-    if (!inputs.find(i => i.name === 'image1')) {
-        node.addInput('image1', 'IMAGE');
-    }
-    if (!inputs.find(i => i.name === 'image2')) {
-        node.addInput('image2', 'IMAGE');
-    }
+    const names = getImageInputs(node).map(i => i.name);
+    if (!names.includes("image1")) node.addInput("image1", "IMAGE");
+    if (!names.includes("image2")) node.addInput("image2", "IMAGE");
 }
 
-function addImageInput(node) {
+/**
+ * 接続状況に応じてピンを追加/削除する。
+ * - 末尾のピンが接続されたら新しい空きピンを追加
+ * - 末尾に未接続ピンが2つ以上あれば1つになるまで削除
+ */
+function updateDynamicInputs(node) {
     const inputs = getImageInputs(node);
-    const highestIndex = Math.max(...inputs.map(i => getImageInputIndex(i.name)));
-    const nextIndex = highestIndex + 1;
-    if (nextIndex <= 100) { // Cap at reasonable limit
-        node.addInput(`image${nextIndex}`, "IMAGE");
-    }
-}
+    if (!inputs.length) return;
 
-function ensureTrailingEmptyInput(node) {
-    const inputs = getImageInputs(node);
-    if (!inputs.length) {
-        addImageInput(node);
+    const last = inputs[inputs.length - 1];
+
+    // 末尾ピンが接続されている → 新しいピンを追加
+    if (last.link != null) {
+        const maxPin = Math.max(...inputs.map(i => getPinNumber(i.name)));
+        if (maxPin < 100) {
+            node.addInput(`image${maxPin + 1}`, "IMAGE");
+        }
         return;
     }
 
-    const lastInput = inputs[inputs.length - 1];
-    // If last input is connected, add new empty input
-    if (lastInput.link !== null && lastInput.link !== undefined) {
-        addImageInput(node);
-    }
-}
-
-function removeUnusedTrailingInputs(node) {
-    const inputs = getImageInputs(node);
-    // Remove trailing unconnected inputs (but keep at least one)
+    // 末尾に未接続ピンが2つ以上 → 余分な末尾ピンを削除（最低1つは残す）
     for (let i = inputs.length - 1; i > 0; i--) {
-        const input = inputs[i];
-        if (!input.link) {
-            const slotIndex = node.inputs.indexOf(input);
-            if (slotIndex >= 0) {
-                node.removeInput(slotIndex);
-            }
+        const prev = inputs[i - 1];
+        const cur = inputs[i];
+        if (cur.link == null && prev.link == null) {
+            const slotIndex = node.inputs.indexOf(cur);
+            if (slotIndex >= 0) node.removeInput(slotIndex);
         } else {
-            break; // Stop at first connected input
+            break;
         }
     }
 }
 
-// ==================== UI Panel Functions ====================
+// ==================== Button Panel ====================
 
-function createControlPanel(node) {
-    // Only create once - reuse existing container
-    let panelContainer = document.getElementById(`multipreview-buttons-${node.id}`);
-    
-    if (panelContainer) {
-        // Panel already exists, just update buttons
-        updateButtonStates(node);
-        return;
-    }
-
-    panelContainer = document.createElement("div");
-    panelContainer.id = `multipreview-buttons-${node.id}`;
-    panelContainer.style.cssText = `
+function createButtonPanel(node) {
+    const container = document.createElement("div");
+    container.style.cssText = `
         display: flex;
+        flex-wrap: wrap;
         gap: 5px;
         padding: 8px;
         background: #2a2a2a;
         border-radius: 4px;
-        margin-bottom: 8px;
-        flex-wrap: wrap;
+        min-height: 48px;
         align-items: center;
+        box-sizing: border-box;
     `;
 
-    node.multipreviewState.buttons = {};
-    node.multipreviewState.buttonContainer = panelContainer;
-
-    // Add as DOM widget
-    node.addDOMWidget("preview_buttons", "preview_buttons", panelContainer, {
+    node.addDOMWidget("mp_buttons", "mp_buttons", container, {
         serialize: false,
         hideOnZoom: false,
+        getMinHeight: () => 48,
     });
 
-    // Recreate buttons whenever inputs change
-    recreateButtons(node);
+    node._mpButtonContainer = container;
+    node._mpButtons = {};
 }
 
-function recreateButtons(node) {
-    const panelContainer = node.multipreviewState.buttonContainer;
-    if (!panelContainer) return;
+function rebuildButtons(node) {
+    const container = node._mpButtonContainer;
+    if (!container) return;
 
-    // Clear existing buttons
-    panelContainer.innerHTML = "";
-    node.multipreviewState.buttons = {};
+    container.innerHTML = "";
+    node._mpButtons = {};
 
     const imageInputs = getImageInputs(node);
-    console.log(`[MultiPreview] Creating buttons for ${imageInputs.length} inputs`);
 
     imageInputs.forEach((input) => {
-        const pinNumber = getImageInputIndex(input.name);
-        const button = document.createElement("button");
-        button.id = `multipreview-btn-${node.id}-${pinNumber}`;
-        button.textContent = pinNumber.toString();
-        button.dataset.pinNumber = pinNumber;
-        button.style.cssText = `
+        const pin = getPinNumber(input.name);
+        const btn = document.createElement("button");
+        btn.textContent = String(pin);
+        btn.style.cssText = `
             min-width: 32px;
             height: 32px;
-            padding: 0;
-            border: 1px solid #555;
+            padding: 0 6px;
             border-radius: 3px;
-            background: #3a3a3a;
-            color: #888;
             font-weight: bold;
-            cursor: not-allowed;
-            transition: all 0.2s ease;
             font-size: 12px;
+            border: 1px solid #444;
+            background: #2e2e2e;
+            color: #555;
+            cursor: not-allowed;
         `;
-        button.disabled = true;
+        btn.disabled = true;
 
-        button.addEventListener("click", (e) => {
+        btn.addEventListener("click", (e) => {
             e.preventDefault();
-            if (!button.disabled) {
-                console.log(`[MultiPreview] Clicked button ${pinNumber}`);
-                node.multipreviewState.selectedPin = pinNumber;
-                updateButtonStates(node);
-                displayPreviewImage(node, node.multipreviewState.previewData);
-            }
+            if (btn.disabled) return;
+            node._mpSelectedPin = pin;
+            updateButtonStates(node);
+            showImage(node, pin);
         });
 
-        button.addEventListener("mouseenter", () => {
-            if (!button.disabled) {
-                button.style.background = "#4a4a4a";
-                button.style.borderColor = "#777";
-            }
-        });
-
-        button.addEventListener("mouseleave", () => {
-            if (!button.disabled) {
-                if (node.multipreviewState.selectedPin === pinNumber) {
-                    button.style.background = "#4a90e2";
-                    button.style.borderColor = "#5a9fef";
-                } else {
-                    button.style.background = "#3a3a3a";
-                    button.style.borderColor = "#555";
-                }
-            }
-        });
-
-        node.multipreviewState.buttons[pinNumber] = {
-            element: button,
-        };
-        panelContainer.appendChild(button);
+        node._mpButtons[pin] = btn;
+        container.appendChild(btn);
     });
-
-    updateButtonStates(node);
-}
-
-function refreshControlPanel(node) {
-    recreateButtons(node);
 }
 
 function updateButtonStates(node) {
-    const imageInputs = getImageInputs(node);
-    
-    console.log(`[MultiPreview] updateButtonStates: ${imageInputs.length} inputs`);
+    const inputs = getImageInputs(node);
+    const selectedPin = node._mpSelectedPin ?? 1;
 
-    imageInputs.forEach((input) => {
-        const pinNumber = getImageInputIndex(input.name);
-        const button = node.multipreviewState.buttons[pinNumber];
-        if (!button) {
-            console.warn(`[MultiPreview] Button not found for pin ${pinNumber}`);
-            return;
-        }
+    inputs.forEach((input) => {
+        const pin = getPinNumber(input.name);
+        const btn = node._mpButtons?.[pin];
+        if (!btn) return;
 
-        const hasConnection = input.link !== null && input.link !== undefined;
-        const isSelected = node.multipreviewState.selectedPin === pinNumber;
+        const connected = input.link != null;
+        const selected = selectedPin === pin;
 
-        if (hasConnection) {
-            button.element.disabled = false;
-            button.element.style.color = "#fff";
-            button.element.style.cursor = "pointer";
-            button.element.style.background = isSelected ? "#4a90e2" : "#3a3a3a";
-            button.element.style.borderColor = isSelected ? "#5a9fef" : "#555";
-            console.log(`[MultiPreview] Pin ${pinNumber}: connected and ${isSelected ? 'selected' : 'not selected'}`);
+        btn.disabled = !connected;
+
+        if (!connected) {
+            btn.style.background = "#2e2e2e";
+            btn.style.borderColor = "#444";
+            btn.style.color = "#555";
+            btn.style.cursor = "not-allowed";
+        } else if (selected) {
+            btn.style.background = "#4a90e2";
+            btn.style.borderColor = "#5a9fef";
+            btn.style.color = "#fff";
+            btn.style.cursor = "pointer";
         } else {
-            button.element.disabled = true;
-            button.element.style.background = "#3a3a3a";
-            button.element.style.borderColor = "#555";
-            button.element.style.color = "#888";
-            button.element.style.cursor = "not-allowed";
-            console.log(`[MultiPreview] Pin ${pinNumber}: not connected`);
+            btn.style.background = "#3a3a3a";
+            btn.style.borderColor = "#555";
+            btn.style.color = "#ccc";
+            btn.style.cursor = "pointer";
         }
     });
 }
 
-// ==================== Preview Canvas Functions ====================
+// ==================== Preview Panel ====================
 
-function createPreviewCanvas(node) {
-    const canvasContainer = document.createElement("div");
-    canvasContainer.id = `multipreview-canvas-${node.id}`;
-    canvasContainer.style.cssText = `
+function createPreviewPanel(node) {
+    const container = document.createElement("div");
+    container.style.cssText = `
         width: 100%;
         min-height: 200px;
         background: #1a1a1a;
@@ -302,102 +222,62 @@ function createPreviewCanvas(node) {
         display: flex;
         align-items: center;
         justify-content: center;
-        margin-top: 8px;
+        overflow: hidden;
+        box-sizing: border-box;
     `;
 
-    const canvas = document.createElement("canvas");
-    canvas.id = `multipreview-canvas-element-${node.id}`;
-    canvas.style.cssText = `
+    const img = document.createElement("img");
+    img.style.cssText = `
         max-width: 100%;
-        max-height: 100%;
+        max-height: 512px;
         object-fit: contain;
+        display: none;
     `;
 
-    canvasContainer.appendChild(canvas);
-    node.multipreviewState.previewCanvas = canvas;
+    const placeholder = document.createElement("span");
+    placeholder.textContent = "No image";
+    placeholder.style.cssText = "color: #555; font-size: 13px; font-family: sans-serif;";
 
-    node.addDOMWidget("preview_canvas", "preview_canvas", canvasContainer, {
+    container.appendChild(img);
+    container.appendChild(placeholder);
+
+    node.addDOMWidget("mp_preview", "mp_preview", container, {
         serialize: false,
         hideOnZoom: false,
         getMinHeight: () => 200,
     });
+
+    node._mpImgElement = img;
+    node._mpPlaceholder = placeholder;
 }
 
-function displayPreviewImage(node, outputData) {
-    if (!node.multipreviewState.previewCanvas) {
+function showImage(node, pinNumber) {
+    const img = node._mpImgElement;
+    const placeholder = node._mpPlaceholder;
+    if (!img) return;
+
+    const entry = (node._mpImages ?? [])[pinNumber - 1]; // 0-indexed
+    if (!entry) {
+        img.style.display = "none";
+        placeholder.style.display = "";
+        placeholder.textContent = "No image";
         return;
     }
 
-    const selectedPin = node.multipreviewState.selectedPin;
-    const imageInputName = `image${selectedPin}`;
+    const params = new URLSearchParams({
+        filename: entry.filename,
+        subfolder: entry.subfolder || "",
+        type: entry.type || "temp",
+        rand: Math.random(),
+    });
 
-    // Try to get image from connected node's output
-    const imageInput = node.inputs?.find(i => i.name === imageInputName);
-    if (!imageInput || !imageInput.link) {
-        // No connection for this pin
-        const canvas = node.multipreviewState.previewCanvas;
-        const ctx = canvas.getContext("2d");
-        ctx.fillStyle = "#1a1a1a";
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.fillStyle = "#666";
-        ctx.font = "14px Arial";
-        ctx.textAlign = "center";
-        ctx.fillText("No image connected", canvas.width / 2, canvas.height / 2);
-        return;
-    }
+    img.src = `/view?${params}`;
+    img.style.display = "block";
+    placeholder.style.display = "none";
 
-    // Get the link info
-    const graph = node.graph;
-    if (!graph) return;
-
-    const link = graph.links[imageInput.link];
-    if (!link) return;
-
-    // Get the source node
-    const sourceNodeId = link.origin_id;
-    const sourceSlot = link.origin_slot;
-    const sourceNode = graph.getNodeById(sourceNodeId);
-
-    if (!sourceNode) return;
-
-    // Try to get image data from source node
-    if (sourceNode.imgs && sourceNode.imgs.length > 0) {
-        // Source is a preview or similar node
-        const img = new Image();
-        img.onload = () => {
-            const canvas = node.multipreviewState.previewCanvas;
-            canvas.width = img.width;
-            canvas.height = img.height;
-            const ctx = canvas.getContext("2d");
-            ctx.drawImage(img, 0, 0);
-        };
-        img.onerror = () => {
-            console.error("[MultiPreview] Failed to load image");
-        };
-        // Set image source based on ComfyUI's image URL pattern
-        const filename = sourceNode.imgs[0];
-        img.src = `/view?filename=${encodeURIComponent(filename)}&type=output`;
-    } else if (sourceNode._outputImages && sourceNode._outputImages.length > 0) {
-        // Alternative: try to get image data directly
-        const imageData = sourceNode._outputImages[0];
-        if (imageData && imageData.data) {
-            const canvas = node.multipreviewState.previewCanvas;
-            canvas.width = imageData.width || 512;
-            canvas.height = imageData.height || 512;
-            const ctx = canvas.getContext("2d");
-            const imgData = ctx.createImageData(canvas.width, canvas.height);
-            imgData.data.set(new Uint8ClampedArray(imageData.data));
-            ctx.putImageData(imgData, 0, 0);
-        }
-    } else {
-        // No image data found
-        const canvas = node.multipreviewState.previewCanvas;
-        const ctx = canvas.getContext("2d");
-        ctx.fillStyle = "#1a1a1a";
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.fillStyle = "#666";
-        ctx.font = "14px Arial";
-        ctx.textAlign = "center";
-        ctx.fillText("Image data not available", canvas.width / 2, canvas.height / 2);
-    }
+    img.onerror = () => {
+        img.style.display = "none";
+        placeholder.style.display = "";
+        placeholder.textContent = "Failed to load image";
+    };
 }
