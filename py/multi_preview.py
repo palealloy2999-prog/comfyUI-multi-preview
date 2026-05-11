@@ -4,25 +4,6 @@ Supports flexible optional image inputs for preview-only display.
 """
 
 
-class FlexibleOptionalImageType(dict):
-    """
-    Special type for flexible optional inputs.
-    Allows ComfyUI to dynamically accept image inputs.
-    """
-    
-    def __init__(self):
-        super().__init__()
-        self.type = "IMAGE"
-    
-    def __getitem__(self, key):
-        # Always return IMAGE type for any key
-        return (self.type,)
-    
-    def __contains__(self, key):
-        # Always return True for any key
-        return True
-
-
 class MultiPreviewNode:
     """
     A preview-only node that displays a single image from multiple inputs.
@@ -32,12 +13,17 @@ class MultiPreviewNode:
     
     @classmethod
     def INPUT_TYPES(cls):
-        return {
+        # Define base inputs - image1 is required
+        # image2-20 are optional and can be extended by JS at runtime
+        inputs = {
             "required": {
                 "image1": ("IMAGE",),
             },
-            "optional": FlexibleOptionalImageType(),
+            "optional": {
+                f"image{i}": ("IMAGE",) for i in range(2, 21)
+            },
         }
+        return inputs
     
     RETURN_TYPES = ()
     RETURN_NAMES = ()
