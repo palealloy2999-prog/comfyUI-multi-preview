@@ -1,5 +1,5 @@
-// MultiPreview v12 debug-lite build
-console.info('[MultiPreview] v12 debug-lite loaded')
+// MultiPreview v18 debug-lite build
+console.info('[MultiPreview] v18 debug-lite loaded')
 
 import { app } from '../../scripts/app.js'
 import { api } from '../../scripts/api.js'
@@ -8,7 +8,7 @@ const PARENT_NODE = 'MultiPreview'
 const RECEIVER_NODE = 'MultiPreviewReceiver'
 const VIRTUAL_ID_BASE = 900000000
 const MAX_PINS = 100
-const LOG_PREFIX = '[MultiPreview v12]'
+const LOG_PREFIX = '[MultiPreview v18]'
 
 function log(event, data = undefined) {
   if (data === undefined) console.log(`${LOG_PREFIX} ${event}`)
@@ -75,6 +75,8 @@ app.registerExtension({
 function patchParentNodeType(nodeType) {
   patchConnectionHandler(nodeType, 'onConnectionsChange')
   patchConnectionHandler(nodeType, 'onConnectionChange')
+  patchResizeHandler(nodeType, 'onResize')
+  patchResizeHandler(nodeType, 'onNodeResized')
 
   const origOnRemoved = nodeType.prototype.onRemoved
   nodeType.prototype.onRemoved = function (...args) {
@@ -102,6 +104,33 @@ function patchConnectionHandler(nodeType, methodName) {
 
   patched._mpPatched = true
   nodeType.prototype[methodName] = patched
+}
+
+function patchResizeHandler(nodeType, methodName) {
+  const original = nodeType.prototype[methodName]
+  if (original?._mpResizePatched) return
+
+  const patched = function (...args) {
+    const result = original?.apply(this, args)
+    if (isParentNode(this)) {
+      handleNodeResize(this, methodName)
+    }
+    return result
+  }
+
+  patched._mpResizePatched = true
+  nodeType.prototype[methodName] = patched
+}
+
+function handleNodeResize(node, source = 'resize') {
+  const signature = getNodeSizeSignature(node)
+  if (signature === node._mpLastSizeSignature && source !== 'force') return
+  node._mpLastSizeSignature = signature
+  requestAnimationFrame(() => {
+    compactDomWidget(node._mpButtonWidget, 34)
+    updatePreviewWidgetSize(node)
+    markNodeDirty(node)
+  })
 }
 
 function patchQueuePrompt() {
@@ -138,6 +167,7 @@ function initializeParentNode(node) {
   node._mpSelectedPin ??= 1
   node._mpImageByPin ??= {}
   node._mpInputSignature = getInputSignature(node)
+  node._mpLastSizeSignature = getNodeSizeSignature(node)
 
   ensureMinimumInputs(node)
 
@@ -166,6 +196,7 @@ function syncParentNode(node, reason = 'manual') {
   markNodeDirty(node)
   const after = getInputSignature(node)
   node._mpInputSignature = after
+  node._mpLastSizeSignature = getNodeSizeSignature(node)
 
   if (before !== after || changeInfo.changed) {
     log('sync', { reason, before, after, changeInfo, node: summarizeNode(node) })
@@ -178,9 +209,16 @@ function getInputSignature(node) {
     .join('|')
 }
 
+function getNodeSizeSignature(node) {
+  const width = Math.round(Number(node?.size?.[0] ?? 0))
+  const height = Math.round(Number(node?.size?.[1] ?? 0))
+  return `${width}x${height}`
+}
+
 function startParentInputWatcher(node) {
   if (node._mpInputWatcher) return
   node._mpInputSignature = getInputSignature(node)
+  node._mpLastSizeSignature = getNodeSizeSignature(node)
 
   node._mpInputWatcher = setInterval(() => {
     if (!app.graph || !app.graph._nodes?.includes(node)) {
@@ -222,10 +260,6 @@ function ensureMinimumInputs(node) {
     node.addInput('image1', 'IMAGE')
     log('pin added', { nodeId: node.id, name: 'image1', reason: 'minimum' })
   }
-  if (!names.includes('image2')) {
-    node.addInput('image2', 'IMAGE')
-    log('pin added', { nodeId: node.id, name: 'image2', reason: 'minimum' })
-  }
 }
 
 function updateDynamicInputs(node) {
@@ -254,7 +288,7 @@ function updateDynamicInputs(node) {
   } while (changed && guard < MAX_PINS)
 
   const inputs = getImageInputs(node)
-  for (let i = inputs.length - 1; i > 1; i--) {
+  for (let i = inputs.length - 1; i > 0; i--) {
     const cur = inputs[i]
     const prev = inputs[i - 1]
     if (cur.link == null && prev.link == null) {
@@ -471,8 +505,36 @@ function isReceiverEntry(value) {
     !Array.isArray(value) &&
     value.parent_id != null &&
     value.pin != null &&
-    value.filename != null
+    (value.filename != null || Array.isArray(value.items))
   )
+}
+
+function normalizeReceiverItems(entry) {
+  if (Array.isArray(entry?.items) && entry.items.length > 0) {
+    return entry.items.map(normalizeReceiverItem).filter(Boolean)
+  }
+  const single = normalizeReceiverItem(entry)
+  return single ? [single] : []
+}
+
+function normalizeReceiverItem(item) {
+  if (!item || typeof item !== 'object' || item.filename == null) return null
+  return {
+    filename: item.filename,
+    subfolder: item.subfolder || '',
+    type: item.type || 'temp',
+    width: Number(item.width) || undefined,
+    height: Number(item.height) || undefined,
+  }
+}
+
+function getCurrentImageItem(entry) {
+  const items = entry?.items || []
+  if (!items.length) return null
+  const current = Number(entry.currentIndex) || 0
+  const index = ((current % items.length) + items.length) % items.length
+  entry.currentIndex = index
+  return items[index]
 }
 
 function handleReceiverEntry(entry) {
@@ -489,15 +551,20 @@ function handleReceiverEntry(entry) {
     return
   }
 
+  const items = normalizeReceiverItems(entry)
+  if (!items.length) {
+    warn('executed skipped: no image items', { parentId, pin, entry })
+    return
+  }
+
   parent._mpImageByPin ??= {}
   parent._mpImageByPin[pin] = {
     pin,
-    filename: entry.filename,
-    subfolder: entry.subfolder || '',
-    type: entry.type || 'temp',
+    items,
+    currentIndex: 0,
   }
 
-  log('image stored', { parentId, pin, entry: parent._mpImageByPin[pin] })
+  log('image stored', { parentId, pin, count: items.length, entry: parent._mpImageByPin[pin] })
 
   normalizeSelectedPin(parent)
   rebuildButtons(parent)
@@ -549,9 +616,9 @@ function rebuildButtons(node) {
     btn.textContent = String(pin)
     btn.type = 'button'
     btn.style.cssText = `
-            min-width: 28px;
+            min-width: 38px;
             height: 24px;
-            padding: 0 6px;
+            padding:0 8px;
             border-radius: 3px;
             font-weight: bold;
             font-size: 12px;
@@ -628,72 +695,183 @@ function createPreviewPanel(node) {
   const container = document.createElement('div')
   container.style.cssText = `
         width: 100%;
-        min-height: 100%;
-        background: #1a1a1a;
-        border: 1px solid #444;
+        height: 100%;
+        min-height: 80px;
         border-radius: 4px;
         display: flex;
         align-items: center;
         justify-content: center;
         overflow: hidden;
         box-sizing: border-box;
+        position: relative;
+        flex-wrap: wrap;
     `
 
   const img = document.createElement('img')
   img.style.cssText = `
-        max-width: 100%;
-        max-height: 100%;
-        height: 100%;
+    max-width: 100%;
+    max-height: calc(100% - 22px);
+    width: auto;
+    height: auto;
         object-fit: contain;
         display: none;
     `
 
   const placeholder = document.createElement('span')
   placeholder.textContent = 'No image'
-  placeholder.style.cssText = 'color: #555; font-size: 13px; font-family: sans-serif;'
+  placeholder.style.cssText = 'color: #fff; font-size: 13px; font-family: sans-serif;'
 
-  container.appendChild(img)
-  container.appendChild(placeholder)
+  const sizeLabel = document.createElement('div')
+  sizeLabel.style.cssText = `
+        padding: 2px 6px;
+        border-radius: 4px;
+        text-align:center;
+        color: #ddd;
+        font-size: 12px;
+        line-height: 1.2;
+        font-family: sans-serif;
+        pointer-events: none;
+        display: none;
+        white-space: nowrap;
+    `
+  sizeLabel.textContent = ''
+
+  const pageButton = document.createElement('button')
+  pageButton.type = 'button'
+  pageButton.style.cssText = `
+        position: absolute;
+        right: 8px;
+        bottom: 8px;
+        min-width: 38px;
+        height: 38px;
+        border: none;
+        border-radius: 8px;
+        background: rgba(45, 45, 45, 0.92);
+        color: #fff;
+        font-size: 12px;
+        font-family: sans-serif;
+        cursor: pointer;
+        display: none;
+    `
+  pageButton.textContent = '1/1'
+  pageButton.addEventListener('click', (e) => {
+    e.preventDefault()
+    e.stopPropagation()
+    cycleBatchImage(node)
+  })
+
+  const contents = document.createElement('div')
+  contents.style.cssText = `
+        max-height:100%;
+    `
+  container.appendChild(contents)
+
+  contents.appendChild(img)
+  contents.appendChild(placeholder)
+  contents.appendChild(sizeLabel)
+  container.appendChild(pageButton)
 
   const widget = node.addDOMWidget('mp_preview', 'mp_preview', container)
-  widget.computeSize = () => [node.size?.[0] ?? 340, 220]
+  widget.computeSize = () => [node.size?.[0] ?? 340, getPreviewHeight(node)]
 
   node._mpImgElement = img
   node._mpPlaceholder = placeholder
+  node._mpSizeLabel = sizeLabel
+  node._mpPageButton = pageButton
   node._mpPreviewWidget = widget
+
+  requestAnimationFrame(() => updatePreviewWidgetSize(node))
 }
 
 function showImage(node, pinNumber) {
   const img = node._mpImgElement
   const placeholder = node._mpPlaceholder
+  const sizeLabel = node._mpSizeLabel
+  const pageButton = node._mpPageButton
   if (!img || !placeholder) return
 
   const entry = node._mpImageByPin?.[pinNumber]
-  if (!entry) {
+  const item = getCurrentImageItem(entry)
+  if (!entry || !item) {
     img.style.display = 'none'
     placeholder.style.display = ''
     placeholder.textContent = 'No image'
+    if (sizeLabel) {
+      sizeLabel.style.display = 'none'
+      sizeLabel.textContent = ''
+    }
+    updatePageButton(pageButton, 0, 0)
     return
   }
 
+  const items = entry.items || []
+  const currentIndex = entry.currentIndex || 0
+  updatePageButton(pageButton, currentIndex, items.length)
+
   const params = new URLSearchParams({
-    filename: entry.filename,
-    subfolder: entry.subfolder || '',
-    type: entry.type || 'temp',
+    filename: item.filename,
+    subfolder: item.subfolder || '',
+    type: item.type || 'temp',
     rand: Math.random(),
   })
 
   const url = api?.apiURL ? api.apiURL(`/view?${params}`) : `/view?${params}`
-  img.onload = () => log('image loaded', { nodeId: node.id, pin: pinNumber, url })
+  img.onload = () => {
+    updateSizeLabel(sizeLabel, item, img)
+    log('image loaded', {
+      nodeId: node.id,
+      pin: pinNumber,
+      url,
+      index: currentIndex,
+      total: items.length,
+      width: item.width,
+      height: item.height,
+    })
+  }
   img.onerror = () => {
     img.style.display = 'none'
     placeholder.style.display = ''
     placeholder.textContent = 'Failed to load image'
-    warn('image load error', { nodeId: node.id, pin: pinNumber, url, entry })
+    if (sizeLabel) {
+      sizeLabel.style.display = 'none'
+      sizeLabel.textContent = ''
+    }
+    warn('image load error', { nodeId: node.id, pin: pinNumber, url, item })
   }
   img.src = url
   img.style.display = 'block'
   placeholder.style.display = 'none'
+  updateSizeLabel(sizeLabel, item, img)
+}
+
+function cycleBatchImage(node) {
+  const pin = node?._mpSelectedPin ?? 1
+  const entry = node?._mpImageByPin?.[pin]
+  if (!entry || !Array.isArray(entry.items) || entry.items.length <= 1) return
+  const current = Number(entry.currentIndex) || 0
+  entry.currentIndex = (current + 1) % entry.items.length
+  log('batch page clicked', { nodeId: node.id, pin, index: entry.currentIndex, total: entry.items.length })
+  showImage(node, pin)
+  markNodeDirty(node)
+}
+
+function updatePageButton(pageButton, currentIndex, total) {
+  if (!pageButton) return
+  if (!Number.isFinite(total) || total <= 1) {
+    pageButton.style.display = 'none'
+    pageButton.textContent = '1/1'
+    return
+  }
+  pageButton.textContent = `${currentIndex + 1}/${total}`
+  pageButton.style.display = ''
+}
+
+function updateSizeLabel(sizeLabel, item, img) {
+  if (!sizeLabel) return
+  const width = Number(item?.width) || img?.naturalWidth || 0
+  const height = Number(item?.height) || img?.naturalHeight || 0
+  sizeLabel.textContent = width > 0 && height > 0 ? `${width} × ${height}` : ''
+  sizeLabel.style.display = width > 0 && height > 0 ? '' : 'none'
 }
 
 function compactDomWidget(widget, height) {
@@ -703,6 +881,7 @@ function compactDomWidget(widget, height) {
   const wrapper = widget.element?.closest?.('.dom-widget')
   if (wrapper) {
     wrapper.classList.remove('size-full')
+    wrapper.style.flex = '0 0 auto'
     wrapper.style.height = `${height}px`
     wrapper.style.minHeight = `${height}px`
     wrapper.style.maxHeight = `${height}px`
@@ -716,6 +895,49 @@ function compactDomWidget(widget, height) {
   }
 }
 
+function getPreviewHeight(node) {
+  // LiteGraph lays out inputs + widgets vertically. Keep the button row compact,
+  // then give the remaining visible node height to the preview widget.
+  const nodeHeight = node.size?.[1] ?? 360
+  const imageInputCount = getImageInputs(node).length
+  const titleHeight = 34
+  const inputRowsHeight = Math.max(1, imageInputCount) * 22
+  const buttonHeight = 42
+  const paddingAndMargins = 34
+  return Math.max(80, nodeHeight - titleHeight - inputRowsHeight - buttonHeight - paddingAndMargins)
+}
+
+function updatePreviewWidgetSize(node) {
+  const widget = node?._mpPreviewWidget
+  if (!widget) return
+
+  const height = getPreviewHeight(node)
+  widget.computeSize = () => [node.size?.[0] ?? 340, height]
+
+  const wrapper = widget.element?.closest?.('.dom-widget')
+  if (wrapper) {
+    wrapper.classList.remove('size-full')
+    wrapper.style.flex = '0 0 auto'
+    wrapper.style.height = `${height}px`
+    wrapper.style.minHeight = `${height}px`
+    wrapper.style.maxHeight = `${height}px`
+    wrapper.style.overflow = 'hidden'
+  }
+
+  if (widget.element) {
+    widget.element.style.height = `${height}px`
+    widget.element.style.minHeight = `${height}px`
+    widget.element.style.maxHeight = `${height}px`
+    widget.element.style.overflow = 'hidden'
+  }
+  if (contents.element) {
+    contents.element.style.height = `${height}px`
+    contents.element.style.minHeight = `${height}px`
+    contents.element.style.maxHeight = `${height}px`
+    contents.element.style.overflow = 'hidden'
+  }
+}
+
 function ensureParentSize(node) {
   const width = Math.max(node.size?.[0] ?? 340, 340)
   const height = Math.max(node.size?.[1] ?? 320, 320)
@@ -726,7 +948,10 @@ function ensureParentSize(node) {
     node.size = [width, height]
   }
 
-  requestAnimationFrame(() => compactDomWidget(node._mpButtonWidget, 34))
+  requestAnimationFrame(() => {
+    compactDomWidget(node._mpButtonWidget, 34)
+    updatePreviewWidgetSize(node)
+  })
 }
 
 function markNodeDirty(node) {

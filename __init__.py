@@ -8,7 +8,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "MultiPreview": "Multi Preview",
+    "MultiPreview": "MultiPreview",
     "MultiPreviewReceiver": "__internal__ MultiPreview Receiver",
 }
 

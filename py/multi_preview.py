@@ -100,26 +100,43 @@ class MultiPreviewReceiverNode:
         return re.sub(r"[^0-9A-Za-z_-]", "_", text)
 
     def receive(self, image, parent_id, pin):
-        img_np = np.clip(image[0].cpu().numpy(), 0, 1)
-        img_np = (img_np * 255).astype(np.uint8)
-        pil_img = Image.fromarray(img_np)
-
         timestamp = int(time.time() * 1000)
         safe_parent = self._safe_filename_part(parent_id)
         safe_pin = self._safe_filename_part(pin)
-        filename = f"multipreview_{safe_parent}_{safe_pin}_{timestamp}.png"
-        filepath = os.path.join(self.output_dir, filename)
-        pil_img.save(filepath, compress_level=self.compress_level)
+        batch_count = int(image.shape[0]) if len(image.shape) > 0 else 1
+        items = []
 
+        for index in range(batch_count):
+            img_np = np.clip(image[index].cpu().numpy(), 0, 1)
+            img_np = (img_np * 255).astype(np.uint8)
+            pil_img = Image.fromarray(img_np)
+
+            filename = f"multipreview_{safe_parent}_{safe_pin}_{timestamp}_{index + 1}.png"
+            filepath = os.path.join(self.output_dir, filename)
+            pil_img.save(filepath, compress_level=self.compress_level)
+
+            height, width = int(img_np.shape[0]), int(img_np.shape[1])
+            items.append({
+                "filename": filename,
+                "subfolder": "",
+                "type": self.type,
+                "width": width,
+                "height": height,
+            })
+
+        first = items[0] if items else {}
         return {
             "ui": {
                 "mp_receiver": [
                     {
                         "parent_id": str(parent_id),
                         "pin": int(pin),
-                        "filename": filename,
-                        "subfolder": "",
-                        "type": self.type,
+                        "filename": first.get("filename"),
+                        "subfolder": first.get("subfolder", ""),
+                        "type": first.get("type", self.type),
+                        "width": first.get("width"),
+                        "height": first.get("height"),
+                        "items": items,
                     }
                 ]
             }
