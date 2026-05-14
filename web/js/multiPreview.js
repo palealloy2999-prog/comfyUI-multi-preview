@@ -1,5 +1,5 @@
-// MultiPreview v18 debug-lite build
-console.info('[MultiPreview] v18 debug-lite loaded')
+// MultiPreview v21 debug-lite build
+console.info('[MultiPreview] v22 rehydrate loaded')
 
 import { app } from '../../scripts/app.js'
 import { api } from '../../scripts/api.js'
@@ -8,7 +8,8 @@ const PARENT_NODE = 'MultiPreview'
 const RECEIVER_NODE = 'MultiPreviewReceiver'
 const VIRTUAL_ID_BASE = 900000000
 const MAX_PINS = 100
-const LOG_PREFIX = '[MultiPreview v18]'
+const LOG_PREFIX = '[MultiPreview v22]'
+const PREVIEW_CACHE = (globalThis.__multiPreviewCache ??= new Map())
 
 function log(event, data = undefined) {
   if (data === undefined) console.log(`${LOG_PREFIX} ${event}`)
@@ -30,6 +31,124 @@ function summarizeNode(node) {
     selectedPin: node._mpSelectedPin,
     imagePins: Object.keys(node._mpImageByPin || {}),
   }
+}
+
+function getPreviewCacheKey(node) {
+  return String(node?.id ?? '')
+}
+
+function cloneImageItem(item) {
+  if (!item || typeof item !== 'object') return null
+  return {
+    filename: item.filename,
+    subfolder: item.subfolder || '',
+    type: item.type || 'temp',
+    width: Number(item.width) || undefined,
+    height: Number(item.height) || undefined,
+  }
+}
+
+function cloneImageEntry(entry) {
+  if (!entry || typeof entry !== 'object') return null
+  const items = Array.isArray(entry.items) ? entry.items.map(cloneImageItem).filter(Boolean) : []
+  return {
+    pin: Number(entry.pin) || 0,
+    items,
+    currentIndex: Number(entry.currentIndex) || 0,
+  }
+}
+
+function cloneImageByPin(imageByPin) {
+  const result = {}
+  for (const [pin, entry] of Object.entries(imageByPin || {})) {
+    const cloned = cloneImageEntry(entry)
+    if (cloned && cloned.items.length > 0) result[pin] = cloned
+  }
+  return result
+}
+
+function cacheParentPreview(node) {
+  if (!isParentNode(node)) return
+  const key = getPreviewCacheKey(node)
+  if (!key) return
+  PREVIEW_CACHE.set(key, {
+    selectedPin: node._mpSelectedPin ?? 1,
+    imageByPin: cloneImageByPin(node._mpImageByPin || {}),
+  })
+}
+
+function restoreParentPreviewCache(node) {
+  if (!isParentNode(node)) return false
+  const key = getPreviewCacheKey(node)
+  const cached = key ? PREVIEW_CACHE.get(key) : null
+  if (!cached) return false
+
+  const hasCurrentImages = Object.keys(node._mpImageByPin || {}).length > 0
+  if (!hasCurrentImages) {
+    node._mpImageByPin = cloneImageByPin(cached.imageByPin || {})
+  }
+  node._mpSelectedPin = cached.selectedPin ?? node._mpSelectedPin ?? 1
+  return true
+}
+
+function clearParentPreviewCache(node) {
+  const key = getPreviewCacheKey(node)
+  if (key) PREVIEW_CACHE.delete(key)
+}
+
+function isAliveElement(element) {
+  return !!(element && element.isConnected)
+}
+
+function removeDomWidgetByName(node, name) {
+  if (!Array.isArray(node?.widgets)) return
+  node.widgets = node.widgets.filter((widget) => widget?.name !== name)
+}
+
+function ensureDomWidgets(node) {
+  let rebuilt = false
+
+  if (!isAliveElement(node._mpButtonContainer)) {
+    removeDomWidgetByName(node, 'mp_buttons')
+    node._mpButtonContainer = null
+    node._mpButtonWidget = null
+    node._mpButtons = {}
+    createButtonPanel(node)
+    rebuilt = true
+  }
+
+  if (!isAliveElement(node._mpImgElement) || !isAliveElement(node._mpPreviewContainer)) {
+    removeDomWidgetByName(node, 'mp_preview')
+    node._mpPreviewContainer = null
+    node._mpPreviewContents = null
+    node._mpImgElement = null
+    node._mpPlaceholder = null
+    node._mpSizeLabel = null
+    node._mpPageButton = null
+    node._mpPreviewWidget = null
+    createPreviewPanel(node)
+    rebuilt = true
+  }
+
+  return rebuilt
+}
+
+function rehydrateParentNode(node, reason = 'rehydrate') {
+  if (!isParentNode(node)) return false
+  const restored = restoreParentPreviewCache(node)
+  const rebuilt = ensureDomWidgets(node)
+
+  if (restored || rebuilt) {
+    rebuildButtons(node)
+    updateButtonStates(node)
+    showImage(node, node._mpSelectedPin ?? 1)
+    ensureParentSize(node)
+    markNodeDirty(node)
+    log('rehydrated', { reason, restored, rebuilt, node: summarizeNode(node) })
+    return true
+  }
+
+  return false
 }
 
 app.registerExtension({
@@ -170,9 +289,8 @@ function initializeParentNode(node) {
   node._mpLastSizeSignature = getNodeSizeSignature(node)
 
   ensureMinimumInputs(node)
-
-  if (!node._mpButtonContainer) createButtonPanel(node)
-  if (!node._mpImgElement) createPreviewPanel(node)
+  restoreParentPreviewCache(node)
+  ensureDomWidgets(node)
 
   rebuildButtons(node)
   updateButtonStates(node)
@@ -223,6 +341,15 @@ function startParentInputWatcher(node) {
   node._mpInputWatcher = setInterval(() => {
     if (!app.graph || !app.graph._nodes?.includes(node)) {
       stopParentInputWatcher(node)
+      return
+    }
+
+    if (
+      !isAliveElement(node._mpButtonContainer) ||
+      !isAliveElement(node._mpPreviewContainer) ||
+      !isAliveElement(node._mpImgElement)
+    ) {
+      rehydrateParentNode(node, 'detachedDomWatcher')
       return
     }
 
@@ -320,6 +447,7 @@ function resetQueuedParentPreviews() {
   for (const node of app.graph?._nodes || []) {
     if (!isParentNode(node)) continue
     node._mpImageByPin = {}
+    clearParentPreviewCache(node)
     normalizeSelectedPin(node)
     updateButtonStates(node)
     showImage(node, node._mpSelectedPin ?? 1)
@@ -565,12 +693,14 @@ function handleReceiverEntry(entry) {
   }
 
   log('image stored', { parentId, pin, count: items.length, entry: parent._mpImageByPin[pin] })
+  cacheParentPreview(parent)
 
   normalizeSelectedPin(parent)
   rebuildButtons(parent)
   updateButtonStates(parent)
   showImage(parent, parent._mpSelectedPin ?? pin)
   ensureParentSize(parent)
+  cacheParentPreview(parent)
   markNodeDirty(parent)
 }
 
@@ -637,6 +767,7 @@ function rebuildButtons(node) {
       log('button clicked', { nodeId: node.id, pin })
       updateButtonStates(node)
       showImage(node, pin)
+      cacheParentPreview(node)
       markNodeDirty(node)
     })
 
@@ -775,6 +906,8 @@ function createPreviewPanel(node) {
   const widget = node.addDOMWidget('mp_preview', 'mp_preview', container)
   widget.computeSize = () => [node.size?.[0] ?? 340, getPreviewHeight(node)]
 
+  node._mpPreviewContainer = container
+  node._mpPreviewContents = contents
   node._mpImgElement = img
   node._mpPlaceholder = placeholder
   node._mpSizeLabel = sizeLabel
@@ -853,6 +986,7 @@ function cycleBatchImage(node) {
   entry.currentIndex = (current + 1) % entry.items.length
   log('batch page clicked', { nodeId: node.id, pin, index: entry.currentIndex, total: entry.items.length })
   showImage(node, pin)
+  cacheParentPreview(node)
   markNodeDirty(node)
 }
 
@@ -931,11 +1065,12 @@ function updatePreviewWidgetSize(node) {
     widget.element.style.maxHeight = `${height}px`
     widget.element.style.overflow = 'hidden'
   }
-  if (contents.element) {
-    contents.element.style.height = `${height}px`
-    contents.element.style.minHeight = `${height}px`
-    contents.element.style.maxHeight = `${height}px`
-    contents.element.style.overflow = 'hidden'
+  const contents = node?._mpPreviewContents
+  if (contents) {
+    contents.style.height = `${height}px`
+    contents.style.minHeight = `${height}px`
+    contents.style.maxHeight = `${height}px`
+    contents.style.overflow = 'hidden'
   }
 }
 
