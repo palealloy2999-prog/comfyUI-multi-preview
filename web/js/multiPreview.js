@@ -762,7 +762,8 @@ function createPreviewPanel(node) {
 
   const contents = document.createElement('div')
   contents.style.cssText = `
-        max-height:100%;
+      max-height:100%;
+      height:100%;
     `
   container.appendChild(contents)
 
