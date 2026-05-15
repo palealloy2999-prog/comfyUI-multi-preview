@@ -1,5 +1,5 @@
 // MultiPreview v21 debug-lite build
-console.info('[MultiPreview] v22 rehydrate loaded')
+console.info('[MultiPreview] v23 preserve-previous-preview loaded')
 
 import { app } from '../../scripts/app.js'
 import { api } from '../../scripts/api.js'
@@ -8,7 +8,7 @@ const PARENT_NODE = 'MultiPreview'
 const RECEIVER_NODE = 'MultiPreviewReceiver'
 const VIRTUAL_ID_BASE = 900000000
 const MAX_PINS = 100
-const LOG_PREFIX = '[MultiPreview v22]'
+const LOG_PREFIX = '[MultiPreview v23]'
 const PREVIEW_CACHE = (globalThis.__multiPreviewCache ??= new Map())
 
 function log(event, data = undefined) {
@@ -311,6 +311,7 @@ function syncParentNode(node, reason = 'manual') {
   updateButtonStates(node)
   showImage(node, node._mpSelectedPin ?? 1)
   ensureParentSize(node)
+  cacheParentPreview(node)
   markNodeDirty(node)
   const after = getInputSignature(node)
   node._mpInputSignature = after
@@ -446,13 +447,20 @@ function dropImagesForRemovedPins(node) {
 function resetQueuedParentPreviews() {
   for (const node of app.graph?._nodes || []) {
     if (!isParentNode(node)) continue
-    node._mpImageByPin = {}
-    clearParentPreviewCache(node)
+
+    // Keep the previous preview visible while the new queue is running.
+    // New results overwrite each pin when their receiver returns.
+    restoreParentPreviewCache(node)
+    ensureDomWidgets(node)
+    dropImagesForRemovedPins(node)
     normalizeSelectedPin(node)
+    rebuildButtons(node)
     updateButtonStates(node)
     showImage(node, node._mpSelectedPin ?? 1)
+    ensureParentSize(node)
+    cacheParentPreview(node)
     markNodeDirty(node)
-    log('preview cache cleared', { nodeId: node.id })
+    log('preview preserved for new queue', { nodeId: node.id, node: summarizeNode(node) })
   }
 }
 
