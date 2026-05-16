@@ -1,4 +1,4 @@
-// MultiPreview v21 debug-lite build
+// MultiPreview v23 debug-lite build
 console.info('[MultiPreview] v23 preserve-previous-preview loaded')
 
 import { app } from '../../scripts/app.js'
