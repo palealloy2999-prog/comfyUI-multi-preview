@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const VERSION = "v25-phase8-clean-fix7-per-pin-index";
+const VERSION = "v1.0";
 const NODE_NAME = "MultiPreview";
 const INTERNAL_RECEIVER_NODE_NAME = "MultiPreviewInternalReceiver";
 const MAX_PINS = 32;

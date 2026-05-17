@@ -1,22 +1,78 @@
-# ComfyUI MultiPreview v25 phase2-fix8-fix3-base
+# ComfyUI MultiPreview
 
-Fix3 をベースにした安定化版です。
+MultiPreview is a custom ComfyUI node for previewing multiple image inputs in a single node.
 
-## 方針
+It supports dynamic image pins, per-pin preview switching, batch image navigation, and immediate preview updates while a workflow is running.
 
-- `PreviewImage.save_images()` で画像保存
-- `ui.images` は返さない
-- pin別メタデータ `mp_images_json` でフロントへ渡す
-- fix3 のボタン切替ロジックを維持
-- 標準Preview由来の重複表示widgetを削除
-- 未接続pinボタンは何もしない
+## Features
 
-## 確認ログ
+- Multiple image inputs in one preview node
+- Dynamic `imageN` input pins
+  - A new empty pin is automatically added as needed
+  - Empty pins remain available for connection
+- Dynamic preview buttons
+  - Buttons are shown only for pins that have an active connection or retained preview state
+- Switch preview by pin button
+- Batch image support
+  - Each pin keeps its own batch image index
+  - Switching between pins restores that pin's previous batch position
+- Immediate preview updates
+  - Images are displayed as soon as each pin finishes
+  - The node does not need to wait for all connected inputs to finish
+- Auto latest mode
+  - Optional `auto_latest` toggle
+  - When enabled, the preview automatically switches to the pin that most recently received an image
+- Stable state handling
+  - Disconnecting a pin does not immediately clear the current preview
+  - Old state is cleaned up on the next execution
+- Node run button fallback
+  - The node still supports normal execution behavior
+- Image preload/cache handling
+  - Reduces flicker when switching pins or receiving new images
+
+## Installation
+
+1. Download or clone this repository into your ComfyUI custom nodes directory:
 
 ```txt
-[MultiPreview] v25-phase2-fix8-fix3-base loaded
+ComfyUI/custom_nodes/ComfyUI-MultiPreview
 ```
 
-## 注意
+2. Restart ComfyUI.
 
-同名ノード競合を避けるため、古い `ComfyUI-MultiPreview-v25-*` テストフォルダは削除または退避してください。
+3. Hard refresh your browser.
+
+4. Add the node from:
+
+```txt
+image / MultiPreview
+```
+
+## Usage
+
+Connect image outputs to the `image1`, `image2`, `image3`, ... inputs.
+
+```txt
+Image source A ──▶ image1
+Image source B ──▶ image2
+Image source C ──▶ image3
+```
+
+MultiPreview will show a button for each connected image pin.
+
+Click a button to switch the preview target.
+
+If a connected input produces a batch, use the normal ComfyUI preview navigation to move through the batch images.
+
+## Auto Latest
+
+The `auto_latest` toggle controls whether the preview should automatically switch to the newest arriving pin.
+
+- OFF: Keep showing the currently selected pin
+- ON: Automatically switch to the pin that most recently received an image
+
+## Notes
+
+MultiPreview uses internal receiver nodes during execution to update previews as soon as each input finishes.
+
+These internal receiver nodes are injected automatically at execution time and do not need to be placed manually.
