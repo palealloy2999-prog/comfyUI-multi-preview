@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const VERSION = "v25-phase8-clean-fix6-image-preload-cache";
+const VERSION = "v25-phase8-clean-fix7-per-pin-index";
 const NODE_NAME = "MultiPreview";
 const INTERNAL_RECEIVER_NODE_NAME = "MultiPreviewInternalReceiver";
 const MAX_PINS = 32;
@@ -310,17 +310,15 @@ function whenEntryReady(entry, callback) {
   return false;
 }
 
-function getTargetImageIndex(node, entries, options = {}) {
+function getTargetImageIndex(node, pinKey, entries, options = {}) {
+  const maxIndex = Math.max(0, entries.length - 1);
+
   if (Number.isInteger(options?.targetIndex)) {
-    return Math.min(Math.max(0, options.targetIndex), Math.max(0, entries.length - 1));
+    return Math.min(Math.max(0, options.targetIndex), maxIndex);
   }
 
-  if (options?.resetIndex === true) {
-    return 0;
-  }
-
-  const prevIndex = Number.isInteger(node.imageIndex) ? node.imageIndex : 0;
-  return Math.min(Math.max(0, prevIndex), Math.max(0, entries.length - 1));
+  // Default behavior: always restore per-pin index.
+  return Math.min(getStoredPinIndex(node, pinKey), maxIndex);
 }
 
 function getSelectedPin(node) {
@@ -341,6 +339,52 @@ function getAutoSwitchLatest(node) {
 function setAutoSwitchLatest(node, enabled) {
   node.properties ??= {};
   node.properties.auto_switch_latest = enabled === true;
+}
+
+function pinImageIndexMap(node) {
+  node.__mpPinImageIndex ??= {};
+  return node.__mpPinImageIndex;
+}
+
+function saveCurrentPinIndex(node) {
+  const pinKey = getSelectedPin(node);
+  if (!pinKey) return;
+
+  const index = Number.isInteger(node.imageIndex) ? node.imageIndex : 0;
+  pinImageIndexMap(node)[String(pinKey)] = Math.max(0, index);
+}
+
+function getStoredPinIndex(node, pinKey) {
+  const raw = pinImageIndexMap(node)[String(pinKey)];
+  return Number.isInteger(raw) ? Math.max(0, raw) : 0;
+}
+
+function setStoredPinIndex(node, pinKey, index) {
+  pinImageIndexMap(node)[String(pinKey)] = Math.max(0, Number(index) || 0);
+}
+
+function clearStoredPinIndex(node, pinKey) {
+  delete pinImageIndexMap(node)[String(pinKey)];
+}
+
+function reconcileConnectedPinIndexState(node) {
+  const prev = new Set((node.__mpConnectedPinSnapshot || []).map((x) => String(x)));
+  const next = new Set(connectedInputPinKeys(node));
+
+  // Reset per-pin batch index when a pin is attached or detached.
+  for (const pinKey of next) {
+    if (!prev.has(pinKey)) {
+      clearStoredPinIndex(node, pinKey);
+    }
+  }
+
+  for (const pinKey of prev) {
+    if (!next.has(pinKey)) {
+      clearStoredPinIndex(node, pinKey);
+    }
+  }
+
+  node.__mpConnectedPinSnapshot = [...next].sort((a, b) => Number(a) - Number(b));
 }
 
 function getPinNumberFromInput(input) {
@@ -557,9 +601,13 @@ function selectPin(node, pinKey, options = {}) {
     return;
   }
 
+  // Persist the current page of the currently selected pin before switching
+  // or re-selecting, so same-pin updates also keep the last viewed page.
+  saveCurrentPinIndex(node);
+
   const images = normalizeImages(node.__mpPinImages?.[pinKey]);
   const entries = images.map((data, index) => makeImageEntry(node, data, index));
-  const targetIndex = getTargetImageIndex(node, entries, options);
+  const targetIndex = getTargetImageIndex(node, pinKey, entries, options);
   const targetEntry = entries[targetIndex];
 
   if (
@@ -590,9 +638,10 @@ function selectPin(node, pinKey, options = {}) {
   node.__mpEntries = entries;
 
   syncContextMenuImages(node, node.__mpEntries, {
-    resetIndex: options?.resetIndex === true,
-    targetIndex: options?.targetIndex,
+    targetIndex,
   });
+  setStoredPinIndex(node, pinKey, node.imageIndex);
+
   removeStandardPreviewWidgetsSoon(node);
   updateButtonLabels(node);
   requestRedraw(node);
@@ -634,7 +683,7 @@ function ensureButtonWidgetsForPins(node) {
     const existing = node.widgets.find((widget) => String(widget.__mpPinKey) === pinKey);
     if (existing) continue;
 
-    const widget = node.addWidget("button", pinKey, pinKey, () => selectPin(node, pinKey, { resetIndex: true, deferUntilLoaded: true }), {});
+    const widget = node.addWidget("button", pinKey, pinKey, () => selectPin(node, pinKey, { deferUntilLoaded: true }), {});
     widget.__mpPinKey = pinKey;
   }
 
@@ -655,6 +704,8 @@ function ensureWidgets(node) {
   node.__mpPinImages ??= emptyPinImages();
   node.__mpEntries ??= [];
   node.__mpImageCache ??= new Map();
+  node.__mpPinImageIndex ??= {};
+  node.__mpConnectedPinSnapshot ??= [];
 
   syncContextMenuImages(node, node.__mpEntries);
 
@@ -717,13 +768,9 @@ function applyReceiverPayloadToParent(payload) {
     !(parent.__mpEntries || []).length;
 
   if (shouldDisplayNow) {
-    const isDifferentPin = selectedPin !== payload.pinKey;
     selectPin(parent, payload.pinKey, {
-      // In auto-follow-latest mode, when another pin receives a new batch,
-      // show that pin and jump to the newest image in that batch.
-      targetIndex: autoSwitchLatest && isDifferentPin
-        ? Math.max(0, payload.images.length - 1)
-        : undefined,
+      // Always use per-pin remembered batch index.
+      // On first display of a pin, this resolves to index 0.
       deferUntilLoaded: true,
     });
   } else {
@@ -958,6 +1005,7 @@ app.registerExtension({
 
       setTimeout(() => {
         reconcileDynamicInputs(this);
+        reconcileConnectedPinIndexState(this);
 
         const selectedPin = getSelectedPin(this);
         if (!buttonPinKeys(this).includes(selectedPin)) {
@@ -982,6 +1030,7 @@ app.registerExtension({
       if (countPinImages(pinImages) > 0) {
         // Direct parent execution is a completed run result, so replace the
         // previous run state instead of keeping stale disconnected pins.
+        saveCurrentPinIndex(this);
         this.__mpPinImages = pinImages;
         preloadPinImages(this, pinImages);
 

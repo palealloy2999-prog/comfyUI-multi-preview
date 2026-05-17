@@ -7,7 +7,7 @@ MAX_PINS = 32
 
 
 class MultiPreview(PreviewImage):
-    """MultiPreview v25 phase8 clean fix6 image preload cache.
+    """MultiPreview v25 phase8 clean fix7 per pin index.
 
     Parent node with dynamic image pins. During queueing, imageN dependencies
     are replaced by injected MultiPreviewInternalReceiver nodes on the frontend.
@@ -56,13 +56,13 @@ class MultiPreview(PreviewImage):
                 pin_images[str(index)] = saved_images
 
         if not pin_images:
-            return {"ui": {"mp_noop": ["1"], "mp_version": ["v25-phase8-clean-fix6-image-preload-cache"]}}
+            return {"ui": {"mp_noop": ["1"], "mp_version": ["v25-phase8-clean-fix7-per-pin-index"]}}
 
         return {
             "ui": {
                 "mp_images": [pin_images],
                 "mp_images_json": [json.dumps(pin_images)],
-                "mp_version": ["v25-phase8-clean-fix6-image-preload-cache"],
+                "mp_version": ["v25-phase8-clean-fix7-per-pin-index"],
             }
         }
 
@@ -117,7 +117,7 @@ class MultiPreviewInternalReceiver(PreviewImage):
             "ui": {
                 "mp_receiver": [payload],
                 "mp_receiver_json": [json.dumps(payload)],
-                "mp_version": ["v25-phase8-clean-fix6-image-preload-cache"],
+                "mp_version": ["v25-phase8-clean-fix7-per-pin-index"],
             }
         }
 
