@@ -1,8 +1,9 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const VERSION = "v25-phase3-dynamic-pins";
+const VERSION = "v25-phase5-visible-receiver-test";
 const NODE_NAME = "MultiPreview";
+const RECEIVER_NODE_NAME = "MultiPreviewReceiver";
 const MAX_PINS = 32;
 const CANVAS_WIDGET_NAME = "multi_preview_canvas";
 
@@ -24,7 +25,7 @@ function requestResizeAndRedraw(node) {
 }
 
 function isOurWidget(widget) {
-  return !!widget && (widget.__mpPinKey || widget.name === CANVAS_WIDGET_NAME);
+  return !!widget && (widget.__mpPinKey || widget.__mpParentIdWidget || widget.name === CANVAS_WIDGET_NAME);
 }
 
 function looksLikeStandardPreviewWidget(widget) {
@@ -88,7 +89,6 @@ function unwrapSingle(value) {
 
   while (Array.isArray(current) && current.length === 1 && guard < 10) {
     const only = current[0];
-    // Keep a single image metadata object wrapped as an image list.
     if (isImageMeta(only)) break;
     current = only;
     guard += 1;
@@ -113,7 +113,7 @@ function parseMaybeJson(value) {
   try {
     return JSON.parse(value);
   } catch (error) {
-    console.warn("[MultiPreview] failed to parse mp_images_json", error, value);
+    console.warn("[MultiPreview] failed to parse json payload", error, value);
     return null;
   }
 }
@@ -192,6 +192,35 @@ function extractPinImages(output) {
   return emptyPinImages();
 }
 
+function extractReceiverPayload(output) {
+  const candidates = [
+    output?.mp_receiver_json,
+    output?.mp_receiver,
+    output?.ui?.mp_receiver_json,
+    output?.ui?.mp_receiver,
+  ];
+
+  for (const candidate of candidates) {
+    const parsed = parseMaybeJson(candidate);
+    const payload = unwrapSingle(parsed);
+    if (!isPlainObject(payload)) continue;
+
+    const parentId = Number(payload.parent_id ?? payload.parentId ?? payload.parent);
+    const pin = Number(payload.pin ?? payload.pin_index ?? payload.pinIndex);
+    const images = normalizeImages(payload.images);
+
+    if (Number.isFinite(parentId) && Number.isInteger(pin) && pin >= 1 && images.length > 0) {
+      return {
+        parentId,
+        pinKey: String(pin),
+        images,
+      };
+    }
+  }
+
+  return null;
+}
+
 function makeImageEntry(node, data, index) {
   const url = imageDataToUrl(data);
   const img = new Image();
@@ -245,8 +274,21 @@ function getImageInputs(node) {
     .sort((a, b) => a.num - b.num);
 }
 
-function currentPinKeys(node) {
+function inputPinKeys(node) {
   return getImageInputs(node).map((item) => String(item.num));
+}
+
+function receivedPinKeys(node) {
+  const keys = Object.keys(node.__mpPinImages || {})
+    .filter((key) => /^\d+$/.test(key))
+    .filter((key) => normalizeImages(node.__mpPinImages?.[key]).length > 0);
+
+  return keys.sort((a, b) => Number(a) - Number(b));
+}
+
+function currentPinKeys(node) {
+  const keys = new Set([...inputPinKeys(node), ...receivedPinKeys(node)]);
+  return [...keys].sort((a, b) => Number(a) - Number(b));
 }
 
 function findImageInputIndex(node, pinNumber) {
@@ -306,12 +348,10 @@ function reconcileDynamicInputs(node) {
   try {
     const desiredCount = desiredInputCount(node);
 
-    // Ensure contiguous image1..imageN inputs.
     for (let num = 1; num <= desiredCount; num += 1) {
       ensureImageInput(node, num);
     }
 
-    // Remove extra trailing empty image inputs only.
     const imageInputsDesc = getImageInputs(node).sort((a, b) => b.num - a.num);
     for (const { input, num } of imageInputsDesc) {
       if (num <= desiredCount) continue;
@@ -319,7 +359,7 @@ function reconcileDynamicInputs(node) {
       removeImageInput(node, num);
     }
 
-    ensureButtonWidgetsForInputs(node);
+    ensureButtonWidgetsForPins(node);
     removeStandardPreviewWidgetsSoon(node);
   } finally {
     node.__mpReconcilingPins = false;
@@ -338,8 +378,6 @@ function firstAvailablePin(node) {
 }
 
 function syncContextMenuImages(node, entries) {
-  // Some ComfyUI extensions read node.imgs[node.imageIndex] directly.
-  // Keep those fields defined.
   node.images = entries.map((entry) => entry.data);
   node.imgs = entries.map((entry) => entry.img);
   node.imageIndex = 0;
@@ -384,18 +422,16 @@ function selectPin(node, pinKey) {
   requestRedraw(node);
 }
 
-function ensureButtonWidgetsForInputs(node) {
+function ensureButtonWidgetsForPins(node) {
   node.widgets ??= [];
 
   const validPins = currentPinKeys(node);
 
-  // Remove pin buttons whose pin no longer exists.
   node.widgets = node.widgets.filter((widget) => {
     if (!widget.__mpPinKey) return true;
     return validPins.includes(String(widget.__mpPinKey));
   });
 
-  // Add missing pin buttons.
   for (const pinKey of validPins) {
     const existing = node.widgets.find((widget) => String(widget.__mpPinKey) === pinKey);
     if (existing) continue;
@@ -404,7 +440,6 @@ function ensureButtonWidgetsForInputs(node) {
     widget.__mpPinKey = pinKey;
   }
 
-  // Keep buttons ordered by pin number after non-pin widgets.
   const nonPinWidgets = node.widgets.filter((widget) => !widget.__mpPinKey);
   const pinWidgets = node.widgets
     .filter((widget) => widget.__mpPinKey)
@@ -415,6 +450,20 @@ function ensureButtonWidgetsForInputs(node) {
   updateButtonLabels(node);
 }
 
+function ensureParentIdWidget(node) {
+  if (!node.widgets) return;
+
+  const value = String(node.id ?? "");
+  let widget = node.widgets.find((w) => w.__mpParentIdWidget);
+  if (!widget) {
+    widget = node.addWidget("text", "parent_id", value, () => {}, {});
+    widget.__mpParentIdWidget = true;
+    widget.disabled = true;
+  }
+
+  widget.value = value;
+}
+
 function ensureWidgets(node) {
   node.properties ??= {};
   node.properties.selected_pin ??= "1";
@@ -422,12 +471,11 @@ function ensureWidgets(node) {
   node.__mpEntries ??= [];
 
   syncContextMenuImages(node, node.__mpEntries);
+  ensureParentIdWidget(node);
 
   if (!node.__mpWidgetsReady) {
     node.__mpWidgetsReady = true;
 
-    // Python exposes many optional pins for backend compatibility.
-    // The frontend trims them to the dynamic visible set here.
     reconcileDynamicInputs(node);
 
     node.size[0] = Math.max(node.size?.[0] || 0, 320);
@@ -436,75 +484,141 @@ function ensureWidgets(node) {
     reconcileDynamicInputs(node);
   }
 
+  ensureButtonWidgetsForPins(node);
   removeStandardPreviewWidgetsSoon(node);
   updateButtonLabels(node);
   requestRedraw(node);
+}
+
+function findNodeById(id) {
+  const wanted = String(id);
+
+  if (app?.graph?.getNodeById) {
+    const node = app.graph.getNodeById(Number(id));
+    if (node) return node;
+  }
+
+  for (const node of app?.graph?._nodes || []) {
+    if (String(node.id) === wanted) return node;
+  }
+
+  return null;
+}
+
+function applyReceiverPayloadToParent(payload) {
+  if (!payload) return false;
+
+  const parent = findNodeById(payload.parentId);
+  if (!parent) {
+    console.warn(`[MultiPreviewReceiver] parent node not found: ${payload.parentId}`);
+    return false;
+  }
+
+  ensureWidgets(parent);
+
+  parent.__mpPinImages ??= emptyPinImages();
+  parent.__mpPinImages[payload.pinKey] = payload.images;
+
+  ensureButtonWidgetsForPins(parent);
+
+  const selectedPin = getSelectedPin(parent);
+  const shouldDisplayNow =
+    selectedPin === payload.pinKey ||
+    !hasImagesForPin(parent, selectedPin) ||
+    !(parent.__mpEntries || []).length;
+
+  if (shouldDisplayNow) {
+    selectPin(parent, payload.pinKey);
+  } else {
+    updateButtonLabels(parent);
+    requestRedraw(parent);
+  }
+
+  removeStandardPreviewWidgetsSoon(parent);
+  requestRedraw(parent);
+  return true;
 }
 
 app.registerExtension({
   name: `mick.MultiPreview.${VERSION}`,
 
   async beforeRegisterNodeDef(nodeType, nodeData) {
-    if (nodeData.name !== NODE_NAME) return;
+    if (nodeData.name === NODE_NAME) {
+      const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
+      const originalOnConfigure = nodeType.prototype.onConfigure;
+      const originalOnExecuted = nodeType.prototype.onExecuted;
+      const originalOnConnectionsChange = nodeType.prototype.onConnectionsChange;
 
-    const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
-    const originalOnConfigure = nodeType.prototype.onConfigure;
-    const originalOnExecuted = nodeType.prototype.onExecuted;
-    const originalOnConnectionsChange = nodeType.prototype.onConnectionsChange;
+      nodeType.prototype.onNodeCreated = function (...args) {
+        const result = originalOnNodeCreated?.apply(this, args);
+        ensureWidgets(this);
+        return result;
+      };
 
-    nodeType.prototype.onNodeCreated = function (...args) {
-      const result = originalOnNodeCreated?.apply(this, args);
-      ensureWidgets(this);
-      return result;
-    };
+      nodeType.prototype.onConfigure = function (...args) {
+        const result = originalOnConfigure?.apply(this, args);
+        ensureWidgets(this);
+        return result;
+      };
 
-    nodeType.prototype.onConfigure = function (...args) {
-      const result = originalOnConfigure?.apply(this, args);
-      ensureWidgets(this);
-      return result;
-    };
+      nodeType.prototype.onConnectionsChange = function (...args) {
+        const result = originalOnConnectionsChange?.apply(this, args);
 
-    nodeType.prototype.onConnectionsChange = function (...args) {
-      const result = originalOnConnectionsChange?.apply(this, args);
+        setTimeout(() => {
+          reconcileDynamicInputs(this);
 
-      // Let LiteGraph finish mutating links first, then reconcile pins/buttons.
-      setTimeout(() => {
-        reconcileDynamicInputs(this);
+          const selectedPin = getSelectedPin(this);
+          if (!currentPinKeys(this).includes(selectedPin)) {
+            setSelectedPin(this, firstAvailablePin(this));
+          }
 
-        const selectedPin = getSelectedPin(this);
-        if (!currentPinKeys(this).includes(selectedPin)) {
-          setSelectedPin(this, firstAvailablePin(this));
+          updateButtonLabels(this);
+          requestRedraw(this);
+        }, 0);
+
+        return result;
+      };
+
+      nodeType.prototype.onExecuted = function (output, ...args) {
+        void originalOnExecuted;
+        void args;
+
+        ensureWidgets(this);
+        removeStandardPreviewWidgetsSoon(this);
+
+        const pinImages = extractPinImages(output);
+        if (countPinImages(pinImages) > 0) {
+          this.__mpPinImages = {
+            ...(this.__mpPinImages || {}),
+            ...pinImages,
+          };
+
+          let selectedPin = getSelectedPin(this);
+          if (!hasImagesForPin(this, selectedPin)) {
+            selectedPin = firstAvailablePin(this);
+          }
+
+          selectPin(this, selectedPin);
         }
 
+        reconcileDynamicInputs(this);
+        removeStandardPreviewWidgetsSoon(this);
         updateButtonLabels(this);
         requestRedraw(this);
-      }, 0);
+      };
+    }
 
-      return result;
-    };
+    if (nodeData.name === RECEIVER_NODE_NAME) {
+      const originalOnExecuted = nodeType.prototype.onExecuted;
 
-    nodeType.prototype.onExecuted = function (output, ...args) {
-      // Do not call the inherited PreviewImage onExecuted here.
-      // This JS follows the provided working base and uses node.imgs/node.images
-      // without adding an extra custom canvas view.
-      void originalOnExecuted;
-      void args;
+      nodeType.prototype.onExecuted = function (output, ...args) {
+        // Receiver must not create its own preview. It only forwards images to parent.
+        void originalOnExecuted;
+        void args;
 
-      ensureWidgets(this);
-      removeStandardPreviewWidgetsSoon(this);
-
-      this.__mpPinImages = extractPinImages(output);
-
-      let selectedPin = getSelectedPin(this);
-      if (!hasImagesForPin(this, selectedPin)) {
-        selectedPin = firstAvailablePin(this);
-      }
-
-      selectPin(this, selectedPin);
-      reconcileDynamicInputs(this);
-      removeStandardPreviewWidgetsSoon(this);
-      updateButtonLabels(this);
-      requestRedraw(this);
-    };
+        const payload = extractReceiverPayload(output);
+        applyReceiverPayloadToParent(payload);
+      };
+    }
   },
 });
