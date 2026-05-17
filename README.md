@@ -57,6 +57,7 @@ Image source A ──▶ image1
 Image source B ──▶ image2
 Image source C ──▶ image3
 ```
+<img width="633" height="996" alt="image" src="https://github.com/user-attachments/assets/928dced6-6cfc-4add-9066-e8efaa9b2a95" />
 
 MultiPreview will show a button for each connected image pin.
 
