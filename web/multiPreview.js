@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const VERSION = "v25-phase2-fix8-fix3-base";
+const VERSION = 'v25-phase3'
 const NODE_NAME = "MultiPreview";
 const PIN_KEYS = ["1", "2"];
 const CANVAS_WIDGET_NAME = "multi_preview_canvas";
@@ -212,22 +212,6 @@ function makeImageEntry(node, data, index) {
   return entry;
 }
 
-function drawPlaceholder(ctx, text, x, y, w, h) {
-  /*
-  ctx.save();
-  ctx.fillStyle = "rgba(80, 80, 80, 0.18)";
-  ctx.fillRect(x, y, w, h);
-  ctx.strokeStyle = "rgba(180, 180, 180, 0.32)";
-  ctx.strokeRect(x, y, w, h);
-  ctx.fillStyle = "rgba(220, 220, 220, 0.72)";
-  ctx.font = "13px sans-serif";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText(text, x + w / 2, y + h / 2);
-  ctx.restore();
-  */
-}
-
 function drawContainImage(ctx, img, x, y, w, h) {
   if (!img?.naturalWidth || !img?.naturalHeight) return;
 
@@ -327,7 +311,7 @@ function ensureWidgets(node) {
     const widget = node.addWidget("button", pinKey, pinKey, () => selectPin(node, pinKey), {});
     widget.__mpPinKey = pinKey;
   }
-  
+
   removeStandardPreviewWidgetsSoon(node);
 
   node.size[0] = Math.max(node.size?.[0] || 0, 320);
