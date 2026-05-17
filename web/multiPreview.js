@@ -1,12 +1,10 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const VERSION = "v25-phase8-custom-event-fix1";
+const VERSION = "v25-phase8-clean-fix1-run-button-fallback";
 const NODE_NAME = "MultiPreview";
-const RECEIVER_NODE_NAME = "MultiPreviewReceiver";
 const INTERNAL_RECEIVER_NODE_NAME = "MultiPreviewInternalReceiver";
 const MAX_PINS = 32;
-const CANVAS_WIDGET_NAME = "multi_preview_canvas";
 
 console.log(`[MultiPreview] ${VERSION} loaded`);
 
@@ -26,12 +24,7 @@ function requestResizeAndRedraw(node) {
 }
 
 function isOurWidget(widget) {
-  return !!widget && (
-    widget.__mpPinKey ||
-    widget.__mpAutoParentWidget ||
-    widget.__mpAutoPinWidget ||
-    widget.name === CANVAS_WIDGET_NAME
-  );
+  return !!widget && widget.__mpPinKey;
 }
 
 function looksLikeStandardPreviewWidget(widget) {
@@ -198,50 +191,25 @@ function extractPinImages(output) {
   return emptyPinImages();
 }
 
-function extractReceiverPayload(output) {
-  const candidates = [
-    output?.mp_receiver_json,
-    output?.mp_receiver,
-    output?.ui?.mp_receiver_json,
-    output?.ui?.mp_receiver,
-  ];
+function normalizeCustomReceiverEvent(event) {
+  const detail = event?.detail ?? event ?? {};
+  const payload = detail?.payload ?? detail;
 
-  for (const candidate of candidates) {
-    const parsed = parseMaybeJson(candidate);
-    const payload = unwrapSingle(parsed);
-    if (!isPlainObject(payload)) continue;
+  if (!payload || typeof payload !== "object") return null;
 
-    const images = normalizeImages(payload.images);
-    if (images.length === 0) continue;
+  const parentId = Number(payload.parent_id ?? payload.parentId ?? payload.parent);
+  const pin = Number(payload.pin ?? payload.pin_index ?? payload.pinIndex);
+  const images = normalizeImages(payload.images);
 
-    const parentIdRaw = payload.parent_id ?? payload.parentId ?? payload.parent;
-    const pinRaw = payload.pin ?? payload.pin_index ?? payload.pinIndex;
-    const receiverIdRaw = payload.receiver_id ?? payload.receiverId ?? payload.id;
-
-    const parentId = Number(parentIdRaw);
-    const pin = Number(pinRaw);
-    const receiverId = Number(receiverIdRaw);
-
-    if (Number.isFinite(parentId) && Number.isInteger(pin) && pin >= 1) {
-      return {
-        parentId,
-        pinKey: String(pin),
-        receiverId: Number.isFinite(receiverId) ? receiverId : null,
-        images,
-      };
-    }
-
-    if (Number.isFinite(receiverId)) {
-      return {
-        receiverId,
-        parentId: null,
-        pinKey: null,
-        images,
-      };
-    }
+  if (!Number.isFinite(parentId) || !Number.isInteger(pin) || pin < 1 || images.length === 0) {
+    return null;
   }
 
-  return null;
+  return {
+    parentId,
+    pinKey: String(pin),
+    images,
+  };
 }
 
 function makeImageEntry(node, data, index) {
@@ -513,177 +481,30 @@ function findNodeById(id) {
   return null;
 }
 
-function allParentNodes() {
-  return (app?.graph?._nodes || []).filter((node) => node.type === NODE_NAME);
-}
-
-function allReceiverNodes() {
-  return (app?.graph?._nodes || []).filter((node) => node.type === RECEIVER_NODE_NAME);
-}
-
-function distance2(a, b) {
-  const ax = Number(a?.pos?.[0] ?? 0);
-  const ay = Number(a?.pos?.[1] ?? 0);
-  const bx = Number(b?.pos?.[0] ?? 0);
-  const by = Number(b?.pos?.[1] ?? 0);
-  const dx = ax - bx;
-  const dy = ay - by;
-  return dx * dx + dy * dy;
-}
-
-function inferParentForReceiver(receiverNode) {
-  const storedParentId = receiverNode?.properties?.mp_parent_id;
-  const storedParent = storedParentId != null ? findNodeById(storedParentId) : null;
-  if (storedParent?.type === NODE_NAME) return storedParent;
-
-  const parents = allParentNodes();
-  if (parents.length === 0) return null;
-  if (parents.length === 1) return parents[0];
-
-  // Prefer a parent visually placed to the left of the receiver.
-  const rx = Number(receiverNode?.pos?.[0] ?? 0);
-  const leftParents = parents.filter((parent) => Number(parent?.pos?.[0] ?? 0) <= rx);
-  const candidates = leftParents.length ? leftParents : parents;
-
-  return candidates
-    .map((parent) => ({ parent, d: distance2(parent, receiverNode) }))
-    .sort((a, b) => a.d - b.d)[0]?.parent || null;
-}
-
-function receiversForParent(parentNode) {
-  return allReceiverNodes()
-    .filter((receiver) => {
-      const parent = inferParentForReceiver(receiver);
-      return parent && String(parent.id) === String(parentNode.id);
-    })
-    .sort((a, b) => {
-      const ay = Number(a.pos?.[1] ?? 0);
-      const by = Number(b.pos?.[1] ?? 0);
-      if (ay !== by) return ay - by;
-
-      const ax = Number(a.pos?.[0] ?? 0);
-      const bx = Number(b.pos?.[0] ?? 0);
-      if (ax !== bx) return ax - bx;
-
-      return Number(a.id) - Number(b.id);
-    });
-}
-
-function setReceiverAutoInfo(receiverNode, parentNode, pinNumber) {
-  receiverNode.properties ??= {};
-  receiverNode.properties.mp_parent_id = parentNode ? Number(parentNode.id) : null;
-  receiverNode.properties.mp_auto_pin = pinNumber ? Number(pinNumber) : null;
-  ensureReceiverInfoWidgets(receiverNode);
-}
-
-function getReceiverAutoPin(receiverNode) {
-  const raw = receiverNode?.properties?.mp_auto_pin;
-  const num = Number(raw);
-  return Number.isInteger(num) && num >= 1 ? num : null;
-}
-
-function assignPinsForParent(parentNode) {
-  if (!parentNode) return [];
-
-  const receivers = receiversForParent(parentNode);
-
-  receivers.forEach((receiver, index) => {
-    const pin = Math.min(MAX_PINS, index + 1);
-    setReceiverAutoInfo(receiver, parentNode, pin);
-    requestRedraw(receiver);
-  });
-
-  return receivers;
-}
-
-function assignAllReceivers() {
-  for (const parent of allParentNodes()) {
-    assignPinsForParent(parent);
-  }
-
-  // Handle orphan receivers so the display is honest.
-  for (const receiver of allReceiverNodes()) {
-    const parent = inferParentForReceiver(receiver);
-    if (!parent) {
-      setReceiverAutoInfo(receiver, null, null);
-      requestRedraw(receiver);
-    }
-  }
-}
-
-function ensureReceiverInfoWidgets(receiverNode) {
-  receiverNode.widgets ??= [];
-
-  const parentValue = receiverNode?.properties?.mp_parent_id != null
-    ? String(receiverNode.properties.mp_parent_id)
-    : "-";
-  const pinValue = getReceiverAutoPin(receiverNode)
-    ? String(getReceiverAutoPin(receiverNode))
-    : "-";
-
-  let parentWidget = receiverNode.widgets.find((w) => w.__mpAutoParentWidget);
-  if (!parentWidget) {
-    parentWidget = receiverNode.addWidget("text", "auto_parent", parentValue, () => {}, {});
-    parentWidget.__mpAutoParentWidget = true;
-    parentWidget.disabled = true;
-  }
-
-  let pinWidget = receiverNode.widgets.find((w) => w.__mpAutoPinWidget);
-  if (!pinWidget) {
-    pinWidget = receiverNode.addWidget("text", "auto_pin", pinValue, () => {}, {});
-    pinWidget.__mpAutoPinWidget = true;
-    pinWidget.disabled = true;
-  }
-
-  parentWidget.value = parentValue;
-  pinWidget.value = pinValue;
-}
-
-function applyReceiverPayloadToParent(payload, receiverNode) {
+function applyReceiverPayloadToParent(payload) {
   if (!payload) return false;
 
-  let parent = null;
-  let pinKey = null;
-
-  if (payload.parentId != null && payload.pinKey != null) {
-    parent = findNodeById(payload.parentId);
-    pinKey = String(payload.pinKey);
-  } else if (receiverNode) {
-    parent = inferParentForReceiver(receiverNode);
-  }
-
+  const parent = findNodeById(payload.parentId);
   if (!parent) {
-    console.warn("[MultiPreviewReceiver] parent node not found", payload, receiverNode);
-    if (receiverNode) ensureReceiverInfoWidgets(receiverNode);
-    return false;
-  }
-
-  if (!pinKey && receiverNode) {
-    assignPinsForParent(parent);
-    const pin = getReceiverAutoPin(receiverNode);
-    pinKey = pin ? String(pin) : null;
-  }
-
-  if (!pinKey) {
-    console.warn("[MultiPreviewReceiver] pin assignment failed", payload, receiverNode);
+    console.warn(`[MultiPreview] parent node not found: ${payload.parentId}`);
     return false;
   }
 
   ensureWidgets(parent);
 
   parent.__mpPinImages ??= emptyPinImages();
-  parent.__mpPinImages[pinKey] = payload.images;
+  parent.__mpPinImages[payload.pinKey] = payload.images;
 
   ensureButtonWidgetsForPins(parent);
 
   const selectedPin = getSelectedPin(parent);
   const shouldDisplayNow =
-    selectedPin === pinKey ||
+    selectedPin === payload.pinKey ||
     !hasImagesForPin(parent, selectedPin) ||
     !(parent.__mpEntries || []).length;
 
   if (shouldDisplayNow) {
-    selectPin(parent, pinKey);
+    selectPin(parent, payload.pinKey);
   } else {
     updateButtonLabels(parent);
     requestRedraw(parent);
@@ -692,6 +513,20 @@ function applyReceiverPayloadToParent(payload, receiverNode) {
   removeStandardPreviewWidgetsSoon(parent);
   requestRedraw(parent);
   return true;
+}
+
+function handleCustomReceiverEvent(event) {
+  const payload = normalizeCustomReceiverEvent(event);
+  if (!payload) return;
+  applyReceiverPayloadToParent(payload);
+}
+
+function registerCustomReceiverEventListener() {
+  if (!api || typeof api.addEventListener !== "function") return;
+  if (api.__mpCustomReceiverListenerRegistered) return;
+
+  api.addEventListener("multi_preview_receiver", handleCustomReceiverEvent);
+  api.__mpCustomReceiverListenerRegistered = true;
 }
 
 const injectedPromptObjects = new WeakSet();
@@ -731,9 +566,6 @@ function connectedImageInputsFromLiveNode(nodeId, promptNode) {
   const liveNode = findNodeById(nodeId);
   const result = [];
 
-  // Use the live LiteGraph node as the source of truth.
-  // The serialized prompt can contain stale/dynamic optional image inputs,
-  // which caused over-injection such as "3 connected pins -> injected 5".
   if (liveNode) {
     for (const { input, num } of getImageInputs(liveNode)) {
       if (!isInputConnected(input)) continue;
@@ -741,7 +573,6 @@ function connectedImageInputsFromLiveNode(nodeId, promptNode) {
       const key = `image${num}`;
       const linkValue = promptNode?.inputs?.[key];
 
-      // Only inject pins that are actually present as executable prompt links.
       if (!Array.isArray(linkValue)) continue;
 
       result.push({ key, pin: num, linkValue });
@@ -750,7 +581,6 @@ function connectedImageInputsFromLiveNode(nodeId, promptNode) {
     return result.sort((a, b) => a.pin - b.pin);
   }
 
-  // Fallback for unusual frontend paths where the live node is unavailable.
   return Object.keys(promptNode?.inputs || {})
     .filter((key) => /^image\d+$/.test(key))
     .filter((key) => Array.isArray(promptNode.inputs[key]))
@@ -764,12 +594,18 @@ function connectedImageInputsFromLiveNode(nodeId, promptNode) {
 }
 
 function removeAllImageDependencies(promptNode) {
-  const inputs = promptNode?.inputs || {};
-  for (const key of Object.keys(inputs)) {
-    if (/^image\d+$/.test(key)) {
-      delete inputs[key];
-    }
-  }
+  // Keep parent MultiPreview image dependencies intact.
+  //
+  // Earlier phase8-clean removed imageN dependencies from the parent prompt node
+  // so the parent would not wait for all inputs. That made internal receivers
+  // the only update path, but it also broke node-level execution paths where
+  // the injected internal receivers are not executed/reported.
+  //
+  // Keeping imageN here provides a safe fallback:
+  // - internal receivers still update the preview immediately
+  // - parent MultiPreview still executes normally at the end
+  // - node execute button can display via the direct parent path
+  void promptNode;
 }
 
 function promptAlreadyHasInternalReceiver(prompt, parentId, pin) {
@@ -797,12 +633,6 @@ function injectInternalReceiversIntoPrompt(prompt) {
 
     const connectedPins = connectedImageInputsFromLiveNode(nodeId, node);
 
-    console.log(
-      `[MultiPreview] node ${nodeId}: connected pins = ${
-        connectedPins.map((item) => item.pin).join(",") || "none"
-      }`
-    );
-
     for (const { pin, linkValue } of connectedPins) {
       if (promptAlreadyHasInternalReceiver(prompt, nodeId, pin)) continue;
 
@@ -822,15 +652,7 @@ function injectInternalReceiversIntoPrompt(prompt) {
       injectedCount += 1;
     }
 
-    // Critical: remove every imageN dependency from the UI node, including
-    // stale extra pins, so the parent does not wait for all image inputs.
     removeAllImageDependencies(node);
-  }
-
-  if (injectedCount > 0) {
-    console.log(`[MultiPreview] injected ${injectedCount} internal receiver(s)`);
-  } else {
-    console.log("[MultiPreview] no internal receiver injected");
   }
 
   return injectedCount;
@@ -847,7 +669,6 @@ function patchQueuePromptOnce() {
     };
 
     api.__mpQueuePromptPatched = true;
-    console.log("[MultiPreview] api.queuePrompt patched");
   }
 
   if (app && typeof app.graphToPrompt === "function" && !app.__mpGraphToPromptPatched) {
@@ -861,54 +682,11 @@ function patchQueuePromptOnce() {
     };
 
     app.__mpGraphToPromptPatched = true;
-    console.log("[MultiPreview] app.graphToPrompt patched");
   }
 }
 
 async function beforeQueuePromptHook(workflow, output) {
   injectInternalReceiversIntoPrompt(output);
-}
-
-function normalizeCustomReceiverEvent(event) {
-  const detail = event?.detail ?? event ?? {};
-  const payload = detail?.payload ?? detail;
-
-  if (!payload || typeof payload !== "object") return null;
-
-  const parentId = Number(payload.parent_id ?? payload.parentId ?? payload.parent);
-  const pin = Number(payload.pin ?? payload.pin_index ?? payload.pinIndex);
-  const images = normalizeImages(payload.images);
-
-  if (!Number.isFinite(parentId) || !Number.isInteger(pin) || pin < 1 || images.length === 0) {
-    return null;
-  }
-
-  return {
-    parentId,
-    pinKey: String(pin),
-    images,
-  };
-}
-
-function handleCustomReceiverEvent(event) {
-  const payload = normalizeCustomReceiverEvent(event);
-  if (!payload) return;
-
-  const ok = applyReceiverPayloadToParent(payload, null);
-  if (ok) {
-    console.log(
-      `[MultiPreview] applied custom event: parent=${payload.parentId} pin=${payload.pinKey} images=${payload.images.length}`
-    );
-  }
-}
-
-function registerCustomReceiverEventListener() {
-  if (!api || typeof api.addEventListener !== "function") return;
-  if (api.__mpCustomReceiverListenerRegistered) return;
-
-  api.addEventListener("multi_preview_receiver", handleCustomReceiverEvent);
-  api.__mpCustomReceiverListenerRegistered = true;
-  console.log("[MultiPreview] multi_preview_receiver listener registered");
 }
 
 app.registerExtension({
@@ -924,102 +702,69 @@ app.registerExtension({
   },
 
   async beforeRegisterNodeDef(nodeType, nodeData) {
-    if (nodeData.name === NODE_NAME) {
-      const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
-      const originalOnConfigure = nodeType.prototype.onConfigure;
-      const originalOnExecuted = nodeType.prototype.onExecuted;
-      const originalOnConnectionsChange = nodeType.prototype.onConnectionsChange;
+    if (nodeData.name !== NODE_NAME) return;
 
-      nodeType.prototype.onNodeCreated = function (...args) {
-        const result = originalOnNodeCreated?.apply(this, args);
-        ensureWidgets(this);
-        setTimeout(() => assignAllReceivers(), 0);
-        return result;
-      };
+    const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
+    const originalOnConfigure = nodeType.prototype.onConfigure;
+    const originalOnExecuted = nodeType.prototype.onExecuted;
+    const originalOnConnectionsChange = nodeType.prototype.onConnectionsChange;
 
-      nodeType.prototype.onConfigure = function (...args) {
-        const result = originalOnConfigure?.apply(this, args);
-        ensureWidgets(this);
-        setTimeout(() => assignAllReceivers(), 0);
-        return result;
-      };
+    nodeType.prototype.onNodeCreated = function (...args) {
+      const result = originalOnNodeCreated?.apply(this, args);
+      ensureWidgets(this);
+      return result;
+    };
 
-      nodeType.prototype.onConnectionsChange = function (...args) {
-        const result = originalOnConnectionsChange?.apply(this, args);
+    nodeType.prototype.onConfigure = function (...args) {
+      const result = originalOnConfigure?.apply(this, args);
+      ensureWidgets(this);
+      return result;
+    };
 
-        setTimeout(() => {
-          reconcileDynamicInputs(this);
-          assignAllReceivers();
+    nodeType.prototype.onConnectionsChange = function (...args) {
+      const result = originalOnConnectionsChange?.apply(this, args);
 
-          const selectedPin = getSelectedPin(this);
-          if (!currentPinKeys(this).includes(selectedPin)) {
-            setSelectedPin(this, firstAvailablePin(this));
-          }
+      setTimeout(() => {
+        reconcileDynamicInputs(this);
 
-          updateButtonLabels(this);
-          requestRedraw(this);
-        }, 0);
-
-        return result;
-      };
-
-      nodeType.prototype.onExecuted = function (output, ...args) {
-        void originalOnExecuted;
-        void args;
-
-        ensureWidgets(this);
-        removeStandardPreviewWidgetsSoon(this);
-
-        const pinImages = extractPinImages(output);
-        if (countPinImages(pinImages) > 0) {
-          this.__mpPinImages = {
-            ...(this.__mpPinImages || {}),
-            ...pinImages,
-          };
-
-          let selectedPin = getSelectedPin(this);
-          if (!hasImagesForPin(this, selectedPin)) {
-            selectedPin = firstAvailablePin(this);
-          }
-
-          selectPin(this, selectedPin);
+        const selectedPin = getSelectedPin(this);
+        if (!currentPinKeys(this).includes(selectedPin)) {
+          setSelectedPin(this, firstAvailablePin(this));
         }
 
-        reconcileDynamicInputs(this);
-        assignAllReceivers();
-        removeStandardPreviewWidgetsSoon(this);
         updateButtonLabels(this);
         requestRedraw(this);
-      };
-    }
+      }, 0);
 
-    if (nodeData.name === RECEIVER_NODE_NAME || nodeData.name === INTERNAL_RECEIVER_NODE_NAME) {
-      const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
-      const originalOnConfigure = nodeType.prototype.onConfigure;
-      const originalOnExecuted = nodeType.prototype.onExecuted;
+      return result;
+    };
 
-      nodeType.prototype.onNodeCreated = function (...args) {
-        const result = originalOnNodeCreated?.apply(this, args);
-        ensureReceiverInfoWidgets(this);
-        setTimeout(() => assignAllReceivers(), 0);
-        return result;
-      };
+    nodeType.prototype.onExecuted = function (output, ...args) {
+      void originalOnExecuted;
+      void args;
 
-      nodeType.prototype.onConfigure = function (...args) {
-        const result = originalOnConfigure?.apply(this, args);
-        ensureReceiverInfoWidgets(this);
-        setTimeout(() => assignAllReceivers(), 0);
-        return result;
-      };
+      ensureWidgets(this);
+      removeStandardPreviewWidgetsSoon(this);
 
-      nodeType.prototype.onExecuted = function (output, ...args) {
-        void originalOnExecuted;
-        void args;
+      const pinImages = extractPinImages(output);
+      if (countPinImages(pinImages) > 0) {
+        this.__mpPinImages = {
+          ...(this.__mpPinImages || {}),
+          ...pinImages,
+        };
 
-        const payload = extractReceiverPayload(output);
-        const receiverNode = payload?.receiverId != null ? findNodeById(payload.receiverId) : this;
-        applyReceiverPayloadToParent(payload, receiverNode);
-      };
-    }
+        let selectedPin = getSelectedPin(this);
+        if (!hasImagesForPin(this, selectedPin)) {
+          selectedPin = firstAvailablePin(this);
+        }
+
+        selectPin(this, selectedPin);
+      }
+
+      reconcileDynamicInputs(this);
+      removeStandardPreviewWidgetsSoon(this);
+      updateButtonLabels(this);
+      requestRedraw(this);
+    };
   },
 });
