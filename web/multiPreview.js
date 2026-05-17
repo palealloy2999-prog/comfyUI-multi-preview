@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const VERSION = "v25-phase8-clean-fix4-preserve-batch-index";
+const VERSION = "v25-phase8-clean-fix6-image-preload-cache";
 const NODE_NAME = "MultiPreview";
 const INTERNAL_RECEIVER_NODE_NAME = "MultiPreviewInternalReceiver";
 const MAX_PINS = 32;
@@ -72,6 +72,14 @@ function imageDataToUrl(data) {
   const previewFormat = typeof app.getPreviewFormatParam === "function" ? app.getPreviewFormatParam() : "";
   const rand = typeof app.getRandParam === "function" ? app.getRandParam() : `&rand=${Math.random()}`;
   return api.apiURL(`/view?filename=${filename}&type=${type}&subfolder=${subfolder}${previewFormat}${rand}`);
+}
+
+function imageCacheKey(data) {
+  return [
+    data?.type ?? "temp",
+    data?.subfolder ?? "",
+    data?.filename ?? "",
+  ].join("/");
 }
 
 function isImageMeta(value) {
@@ -212,32 +220,107 @@ function normalizeCustomReceiverEvent(event) {
   };
 }
 
+function imageCacheForNode(node) {
+  node.__mpImageCache ??= new Map();
+  return node.__mpImageCache;
+}
+
 function makeImageEntry(node, data, index) {
-  const url = imageDataToUrl(data);
-  const img = new Image();
+  const key = imageCacheKey(data);
+  const cache = imageCacheForNode(node);
+  let entry = cache.get(key);
 
-  const entry = {
-    data,
-    index,
-    url,
-    img,
-    loaded: false,
-    error: false,
-  };
+  if (!entry) {
+    const url = imageDataToUrl(data);
+    const img = new Image();
 
-  img.onload = () => {
-    entry.loaded = true;
-    requestRedraw(node);
-  };
+    entry = {
+      data,
+      index,
+      url,
+      img,
+      loaded: false,
+      error: false,
+      waiters: [],
+    };
 
-  img.onerror = () => {
-    entry.error = true;
-    console.warn(`[MultiPreview] failed to load preview image: ${url}`);
-    requestRedraw(node);
-  };
+    img.onload = () => {
+      entry.loaded = true;
+      entry.error = false;
 
-  img.src = url;
+      const waiters = entry.waiters.splice(0);
+      for (const waiter of waiters) {
+        try {
+          waiter(entry);
+        } catch (error) {
+          console.warn("[MultiPreview] image load waiter failed", error);
+        }
+      }
+
+      requestRedraw(node);
+    };
+
+    img.onerror = () => {
+      entry.error = true;
+
+      const waiters = entry.waiters.splice(0);
+      for (const waiter of waiters) {
+        try {
+          waiter(entry);
+        } catch (error) {
+          console.warn("[MultiPreview] image error waiter failed", error);
+        }
+      }
+
+      console.warn(`[MultiPreview] failed to load preview image: ${url}`);
+      requestRedraw(node);
+    };
+
+    img.src = url;
+    cache.set(key, entry);
+  }
+
+  entry.data = data;
+  entry.index = index;
   return entry;
+}
+
+function preloadImages(node, images) {
+  normalizeImages(images).forEach((data, index) => makeImageEntry(node, data, index));
+}
+
+function preloadPinImages(node, pinImages) {
+  if (!pinImages || typeof pinImages !== "object") return;
+
+  for (const images of Object.values(pinImages)) {
+    preloadImages(node, images);
+  }
+}
+
+function whenEntryReady(entry, callback) {
+  if (!entry) return false;
+
+  if (entry.loaded || entry.error) {
+    callback(entry);
+    return true;
+  }
+
+  entry.waiters ??= [];
+  entry.waiters.push(callback);
+  return false;
+}
+
+function getTargetImageIndex(node, entries, options = {}) {
+  if (Number.isInteger(options?.targetIndex)) {
+    return Math.min(Math.max(0, options.targetIndex), Math.max(0, entries.length - 1));
+  }
+
+  if (options?.resetIndex === true) {
+    return 0;
+  }
+
+  const prevIndex = Number.isInteger(node.imageIndex) ? node.imageIndex : 0;
+  return Math.min(Math.max(0, prevIndex), Math.max(0, entries.length - 1));
 }
 
 function getSelectedPin(node) {
@@ -248,6 +331,16 @@ function getSelectedPin(node) {
 function setSelectedPin(node, pinKey) {
   node.properties ??= {};
   node.properties.selected_pin = String(pinKey);
+}
+
+function getAutoSwitchLatest(node) {
+  node.properties ??= {};
+  return node.properties.auto_switch_latest === true;
+}
+
+function setAutoSwitchLatest(node, enabled) {
+  node.properties ??= {};
+  node.properties.auto_switch_latest = enabled === true;
 }
 
 function getPinNumberFromInput(input) {
@@ -418,6 +511,7 @@ function prepareNodeStateForRun(node, activePinKeys) {
 
 function syncContextMenuImages(node, entries, options = {}) {
   const resetIndex = options?.resetIndex === true;
+  const hasTargetIndex = Number.isInteger(options?.targetIndex);
   const prevIndex = Number.isInteger(node.imageIndex) ? node.imageIndex : 0;
   const maxIndex = Math.max(0, entries.length - 1);
 
@@ -426,7 +520,13 @@ function syncContextMenuImages(node, entries, options = {}) {
 
   // Preserve the current batch page when other pins update or when the same
   // pin receives a new result. Reset only for explicit user pin switching.
-  node.imageIndex = resetIndex ? 0 : Math.min(Math.max(0, prevIndex), maxIndex);
+  // targetIndex is used for auto-follow-latest mode.
+  if (hasTargetIndex) {
+    node.imageIndex = Math.min(Math.max(0, options.targetIndex), maxIndex);
+  } else {
+    node.imageIndex = resetIndex ? 0 : Math.min(Math.max(0, prevIndex), maxIndex);
+  }
+
   node.overIndex = null;
 }
 
@@ -457,17 +557,67 @@ function selectPin(node, pinKey, options = {}) {
     return;
   }
 
-  setSelectedPin(node, pinKey);
-
   const images = normalizeImages(node.__mpPinImages?.[pinKey]);
-  node.__mpEntries = images.map((data, index) => makeImageEntry(node, data, index));
+  const entries = images.map((data, index) => makeImageEntry(node, data, index));
+  const targetIndex = getTargetImageIndex(node, entries, options);
+  const targetEntry = entries[targetIndex];
+
+  if (
+    options?.deferUntilLoaded === true &&
+    (node.imgs || []).length > 0 &&
+    targetEntry &&
+    !targetEntry.loaded &&
+    !targetEntry.error
+  ) {
+    const token = {};
+    node.__mpPendingSelectionToken = token;
+
+    whenEntryReady(targetEntry, () => {
+      if (node.__mpPendingSelectionToken !== token) return;
+      selectPin(node, pinKey, {
+        ...options,
+        deferUntilLoaded: false,
+        targetIndex,
+      });
+    });
+
+    updateButtonLabels(node);
+    requestRedraw(node);
+    return;
+  }
+
+  setSelectedPin(node, pinKey);
+  node.__mpEntries = entries;
 
   syncContextMenuImages(node, node.__mpEntries, {
     resetIndex: options?.resetIndex === true,
+    targetIndex: options?.targetIndex,
   });
   removeStandardPreviewWidgetsSoon(node);
   updateButtonLabels(node);
   requestRedraw(node);
+}
+
+function ensureAutoSwitchWidget(node) {
+  node.widgets ??= [];
+
+  let widget = node.widgets.find((w) => w.__mpAutoSwitchWidget);
+  if (widget) {
+    widget.value = getAutoSwitchLatest(node);
+    return;
+  }
+
+  widget = node.addWidget(
+    "toggle",
+    "auto_latest",
+    getAutoSwitchLatest(node),
+    (value) => {
+      setAutoSwitchLatest(node, value === true);
+      requestRedraw(node);
+    },
+    {}
+  );
+  widget.__mpAutoSwitchWidget = true;
 }
 
 function ensureButtonWidgetsForPins(node) {
@@ -484,7 +634,7 @@ function ensureButtonWidgetsForPins(node) {
     const existing = node.widgets.find((widget) => String(widget.__mpPinKey) === pinKey);
     if (existing) continue;
 
-    const widget = node.addWidget("button", pinKey, pinKey, () => selectPin(node, pinKey, { resetIndex: true }), {});
+    const widget = node.addWidget("button", pinKey, pinKey, () => selectPin(node, pinKey, { resetIndex: true, deferUntilLoaded: true }), {});
     widget.__mpPinKey = pinKey;
   }
 
@@ -501,8 +651,10 @@ function ensureButtonWidgetsForPins(node) {
 function ensureWidgets(node) {
   node.properties ??= {};
   node.properties.selected_pin ??= "1";
+  node.properties.auto_switch_latest ??= false;
   node.__mpPinImages ??= emptyPinImages();
   node.__mpEntries ??= [];
+  node.__mpImageCache ??= new Map();
 
   syncContextMenuImages(node, node.__mpEntries);
 
@@ -517,6 +669,7 @@ function ensureWidgets(node) {
     reconcileDynamicInputs(node);
   }
 
+  ensureAutoSwitchWidget(node);
   ensureButtonWidgetsForPins(node);
   removeStandardPreviewWidgetsSoon(node);
   updateButtonLabels(node);
@@ -551,17 +704,28 @@ function applyReceiverPayloadToParent(payload) {
 
   parent.__mpPinImages ??= emptyPinImages();
   parent.__mpPinImages[payload.pinKey] = payload.images;
+  preloadImages(parent, payload.images);
 
   ensureButtonWidgetsForPins(parent);
 
   const selectedPin = getSelectedPin(parent);
+  const autoSwitchLatest = getAutoSwitchLatest(parent) === true;
   const shouldDisplayNow =
+    autoSwitchLatest ||
     selectedPin === payload.pinKey ||
     !hasImagesForPin(parent, selectedPin) ||
     !(parent.__mpEntries || []).length;
 
   if (shouldDisplayNow) {
-    selectPin(parent, payload.pinKey);
+    const isDifferentPin = selectedPin !== payload.pinKey;
+    selectPin(parent, payload.pinKey, {
+      // In auto-follow-latest mode, when another pin receives a new batch,
+      // show that pin and jump to the newest image in that batch.
+      targetIndex: autoSwitchLatest && isDifferentPin
+        ? Math.max(0, payload.images.length - 1)
+        : undefined,
+      deferUntilLoaded: true,
+    });
   } else {
     updateButtonLabels(parent);
     requestRedraw(parent);
@@ -819,6 +983,7 @@ app.registerExtension({
         // Direct parent execution is a completed run result, so replace the
         // previous run state instead of keeping stale disconnected pins.
         this.__mpPinImages = pinImages;
+        preloadPinImages(this, pinImages);
 
         let selectedPin = getSelectedPin(this);
         if (!hasImagesForPin(this, selectedPin)) {
