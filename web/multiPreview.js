@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const VERSION = "v25-phase8-clean-fix1-run-button-fallback";
+const VERSION = "v25-phase8-clean-fix3-preserve-state-until-run";
 const NODE_NAME = "MultiPreview";
 const INTERNAL_RECEIVER_NODE_NAME = "MultiPreviewInternalReceiver";
 const MAX_PINS = 32;
@@ -269,6 +269,24 @@ function inputPinKeys(node) {
   return getImageInputs(node).map((item) => String(item.num));
 }
 
+function connectedInputPinKeys(node) {
+  return getImageInputs(node)
+    .filter(({ input }) => isInputConnected(input))
+    .map((item) => String(item.num));
+}
+
+function buttonPinKeys(node) {
+  // Dynamic inputs include one extra empty pin for the next connection.
+  // Buttons should be shown for:
+  // - currently connected pins
+  // - pins that still have last-run images
+  //
+  // This keeps the current preview/button state when a cable is disconnected.
+  // The stale state is cleared at the next execution, not immediately on disconnect.
+  const keys = new Set([...connectedInputPinKeys(node), ...receivedPinKeys(node)]);
+  return [...keys].sort((a, b) => Number(a) - Number(b));
+}
+
 function receivedPinKeys(node) {
   const keys = Object.keys(node.__mpPinImages || {})
     .filter((key) => /^\d+$/.test(key))
@@ -332,11 +350,19 @@ function desiredInputCount(node) {
   return Math.min(MAX_PINS, maxConnected + 1);
 }
 
+function clearDisconnectedPinImages(node) {
+  // Do not clear on connection changes.
+  // Preserve the current preview state until the next execution starts.
+  void node;
+}
+
 function reconcileDynamicInputs(node) {
   if (!node || node.__mpReconcilingPins) return;
   node.__mpReconcilingPins = true;
 
   try {
+    clearDisconnectedPinImages(node);
+
     const desiredCount = desiredInputCount(node);
 
     for (let num = 1; num <= desiredCount; num += 1) {
@@ -364,8 +390,30 @@ function hasImagesForPin(node, pinKey) {
 }
 
 function firstAvailablePin(node) {
-  const keys = currentPinKeys(node);
+  const keys = buttonPinKeys(node);
   return keys.find((pinKey) => hasImagesForPin(node, pinKey)) || keys[0] || "1";
+}
+
+function prepareNodeStateForRun(node, activePinKeys) {
+  if (!node) return;
+
+  const active = new Set((activePinKeys || []).map((key) => String(key)));
+
+  node.__mpPinImages ??= emptyPinImages();
+
+  for (const key of Object.keys(node.__mpPinImages)) {
+    if (!active.has(String(key))) {
+      delete node.__mpPinImages[key];
+    }
+  }
+
+  const selectedPin = getSelectedPin(node);
+  if (!active.has(selectedPin)) {
+    setSelectedPin(node, firstAvailablePin(node));
+  }
+
+  updateButtonLabels(node);
+  requestRedraw(node);
 }
 
 function syncContextMenuImages(node, entries) {
@@ -378,7 +426,7 @@ function syncContextMenuImages(node, entries) {
 function updateButtonLabels(node) {
   if (!node.widgets) return;
   const selectedPin = getSelectedPin(node);
-  const validPins = new Set(currentPinKeys(node));
+  const validPins = new Set(buttonPinKeys(node));
 
   for (const widget of node.widgets) {
     if (!widget.__mpPinKey) continue;
@@ -416,7 +464,7 @@ function selectPin(node, pinKey) {
 function ensureButtonWidgetsForPins(node) {
   node.widgets ??= [];
 
-  const validPins = currentPinKeys(node);
+  const validPins = buttonPinKeys(node);
 
   node.widgets = node.widgets.filter((widget) => {
     if (!widget.__mpPinKey) return true;
@@ -632,6 +680,17 @@ function injectInternalReceiversIntoPrompt(prompt) {
     if (node.class_type !== NODE_NAME) continue;
 
     const connectedPins = connectedImageInputsFromLiveNode(nodeId, node);
+    const liveNode = findNodeById(nodeId);
+
+    // At execution start, clear stale images for pins that are no longer
+    // connected. Until this point, disconnecting a cable does not immediately
+    // alter the displayed preview state.
+    if (liveNode) {
+      prepareNodeStateForRun(
+        liveNode,
+        connectedPins.map((item) => String(item.pin))
+      );
+    }
 
     for (const { pin, linkValue } of connectedPins) {
       if (promptAlreadyHasInternalReceiver(prompt, nodeId, pin)) continue;
@@ -728,7 +787,7 @@ app.registerExtension({
         reconcileDynamicInputs(this);
 
         const selectedPin = getSelectedPin(this);
-        if (!currentPinKeys(this).includes(selectedPin)) {
+        if (!buttonPinKeys(this).includes(selectedPin)) {
           setSelectedPin(this, firstAvailablePin(this));
         }
 
@@ -748,10 +807,9 @@ app.registerExtension({
 
       const pinImages = extractPinImages(output);
       if (countPinImages(pinImages) > 0) {
-        this.__mpPinImages = {
-          ...(this.__mpPinImages || {}),
-          ...pinImages,
-        };
+        // Direct parent execution is a completed run result, so replace the
+        // previous run state instead of keeping stale disconnected pins.
+        this.__mpPinImages = pinImages;
 
         let selectedPin = getSelectedPin(this);
         if (!hasImagesForPin(this, selectedPin)) {
