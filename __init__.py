@@ -1,15 +1,5 @@
-WEB_DIRECTORY = "./web/js"
+from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
 
-from .py.multi_preview import MultiPreviewNode, MultiPreviewReceiverNode
+WEB_DIRECTORY = "./web"
 
-NODE_CLASS_MAPPINGS = {
-    "MultiPreview": MultiPreviewNode,
-    "MultiPreviewReceiver": MultiPreviewReceiverNode,
-}
-
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "MultiPreview": "MultiPreview",
-    "MultiPreviewReceiver": "__internal__ MultiPreview Receiver",
-}
-
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
