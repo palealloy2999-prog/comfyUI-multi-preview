@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const VERSION = "v25-phase8-clean-fix3-preserve-state-until-run";
+const VERSION = "v25-phase8-clean-fix4-preserve-batch-index";
 const NODE_NAME = "MultiPreview";
 const INTERNAL_RECEIVER_NODE_NAME = "MultiPreviewInternalReceiver";
 const MAX_PINS = 32;
@@ -416,10 +416,17 @@ function prepareNodeStateForRun(node, activePinKeys) {
   requestRedraw(node);
 }
 
-function syncContextMenuImages(node, entries) {
+function syncContextMenuImages(node, entries, options = {}) {
+  const resetIndex = options?.resetIndex === true;
+  const prevIndex = Number.isInteger(node.imageIndex) ? node.imageIndex : 0;
+  const maxIndex = Math.max(0, entries.length - 1);
+
   node.images = entries.map((entry) => entry.data);
   node.imgs = entries.map((entry) => entry.img);
-  node.imageIndex = 0;
+
+  // Preserve the current batch page when other pins update or when the same
+  // pin receives a new result. Reset only for explicit user pin switching.
+  node.imageIndex = resetIndex ? 0 : Math.min(Math.max(0, prevIndex), maxIndex);
   node.overIndex = null;
 }
 
@@ -441,7 +448,7 @@ function updateButtonLabels(node) {
   }
 }
 
-function selectPin(node, pinKey) {
+function selectPin(node, pinKey, options = {}) {
   pinKey = String(pinKey);
 
   if (!hasImagesForPin(node, pinKey)) {
@@ -455,7 +462,9 @@ function selectPin(node, pinKey) {
   const images = normalizeImages(node.__mpPinImages?.[pinKey]);
   node.__mpEntries = images.map((data, index) => makeImageEntry(node, data, index));
 
-  syncContextMenuImages(node, node.__mpEntries);
+  syncContextMenuImages(node, node.__mpEntries, {
+    resetIndex: options?.resetIndex === true,
+  });
   removeStandardPreviewWidgetsSoon(node);
   updateButtonLabels(node);
   requestRedraw(node);
@@ -475,7 +484,7 @@ function ensureButtonWidgetsForPins(node) {
     const existing = node.widgets.find((widget) => String(widget.__mpPinKey) === pinKey);
     if (existing) continue;
 
-    const widget = node.addWidget("button", pinKey, pinKey, () => selectPin(node, pinKey), {});
+    const widget = node.addWidget("button", pinKey, pinKey, () => selectPin(node, pinKey, { resetIndex: true }), {});
     widget.__mpPinKey = pinKey;
   }
 
