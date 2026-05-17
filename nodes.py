@@ -2,30 +2,28 @@ import json
 from nodes import PreviewImage
 
 
+MAX_PINS = 32
+
+
 class MultiPreview(PreviewImage):
-    """MultiPreview v25 phase2-fix8-fix3-base.
+    """MultiPreview v25 phase3 dynamic pins.
 
-    Phase 2 scope:
-    - keep the fixed node name/display name: MultiPreview
-    - inherit ComfyUI core PreviewImage
-    - support two IMAGE inputs: image1, image2
-    - save each connected pin through PreviewImage.save_images()
-    - draw/switch previews on the frontend canvas using pin-specific metadata
-
-    Important fix3 note:
-    ComfyUI aggregates every value under the returned `ui` dict by calling
-    `extend()`. Therefore custom scalar/object UI payloads must be wrapped in
-    a list. Returning a raw dict/string makes the frontend receive keys or
-    characters instead of the intended payload.
+    - Node name/display name: MultiPreview
+    - Inherits ComfyUI core PreviewImage
+    - Frontend shows dynamic imageN pins/buttons
+    - Backend exposes image1..image{MAX_PINS} so dynamically added pins can execute
+    - Uses PreviewImage.save_images()
+    - Does not return ui.images; frontend follows the working v25-phase3 JS base
     """
 
     @classmethod
     def INPUT_TYPES(cls):
+        optional = {}
+        for index in range(1, MAX_PINS + 1):
+            optional[f"image{index}"] = ("IMAGE",)
+
         return {
-            "optional": {
-                "image1": ("IMAGE",),
-                "image2": ("IMAGE",),
-            },
+            "optional": optional,
             "hidden": {
                 "prompt": "PROMPT",
                 "extra_pnginfo": "EXTRA_PNGINFO",
@@ -36,7 +34,7 @@ class MultiPreview(PreviewImage):
     FUNCTION = "preview"
     OUTPUT_NODE = True
     CATEGORY = "image"
-    DESCRIPTION = "PreviewImage-based multi-pin preview node. v25 phase2-fix8-fix3-base: image1/image2 + button switching."
+    DESCRIPTION = "PreviewImage-compatible dynamic multi-pin preview node. v25 phase3."
 
     def _save_pin_images(self, images, pin_index, prompt=None, extra_pnginfo=None):
         if images is None:
@@ -50,27 +48,24 @@ class MultiPreview(PreviewImage):
         )
         return result.get("ui", {}).get("images", [])
 
-    def preview(self, image1=None, image2=None, prompt=None, extra_pnginfo=None):
-        if image1 is None and image2 is None:
+    def preview(self, prompt=None, extra_pnginfo=None, **kwargs):
+        pin_images = {}
+
+        for index in range(1, MAX_PINS + 1):
+            key = f"image{index}"
+            images = kwargs.get(key, None)
+            saved_images = self._save_pin_images(images, index, prompt, extra_pnginfo)
+            if saved_images:
+                pin_images[str(index)] = saved_images
+
+        if not pin_images:
             raise ValueError("MultiPreview requires at least one connected IMAGE input.")
 
-        pin_images = {
-            "1": self._save_pin_images(image1, 1, prompt, extra_pnginfo),
-            "2": self._save_pin_images(image2, 2, prompt, extra_pnginfo),
-        }
-
-        # NOTE:
-        # Do not return standard `images` here. If ui.images is returned,
-        # ComfyUI's built-in preview renderer and MultiPreview's switchable
-        # canvas can both draw, causing duplicate previews.
-        #
-        # Non-standard UI payloads are wrapped in lists because ComfyUI merges
-        # UI values with list.extend().
         return {
             "ui": {
                 "mp_images": [pin_images],
                 "mp_images_json": [json.dumps(pin_images)],
-                "mp_version": ["v25-phase2-fix8-fix3-base"],
+                "mp_version": ["v25-phase3-dynamic-pins"],
             }
         }
 
