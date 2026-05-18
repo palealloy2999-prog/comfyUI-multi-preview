@@ -1,10 +1,18 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const VERSION = "v1.0";
+const VERSION = "v1.1.0";
 const NODE_NAME = "MultiPreview";
 const INTERNAL_RECEIVER_NODE_NAME = "MultiPreviewInternalReceiver";
+
+// Keep this value in sync with MAX_PINS in nodes.py.
 const MAX_PINS = 32;
+
+const DEFAULT_NODE_WIDTH = 320;
+const DEFAULT_NODE_HEIGHT = 390;
+const MAX_UNWRAP_DEPTH = 10;
+const STANDARD_PREVIEW_CLEANUP_DELAY_MS = 50;
+const MAX_IMAGE_CACHE_ENTRIES = 128;
 
 console.log(`[MultiPreview] ${VERSION} loaded`);
 
@@ -34,10 +42,11 @@ function looksLikeStandardPreviewWidget(widget) {
   const type = String(widget.type || "").toLowerCase();
   const ctor = String(widget.constructor?.name || "").toLowerCase();
 
+  // Keep this intentionally conservative. This cleanup only targets the
+  // standard image preview widget that ComfyUI may add asynchronously.
   return (
     widget.name === "$$canvas-image-preview" ||
     name.includes("preview") ||
-    name.includes("image") ||
     type === "image" ||
     ctor.includes("imagepreview")
   );
@@ -55,6 +64,9 @@ function removeStandardPreviewWidgets(node) {
 }
 
 function removeStandardPreviewWidgetsSoon(node) {
+  // ComfyUI can recreate the standard preview widget asynchronously after
+  // node execution. Schedule cleanup across a few timing phases to avoid
+  // duplicate previews without depending on one specific frontend lifecycle.
   removeStandardPreviewWidgets(node);
 
   if (typeof requestAnimationFrame === "function") {
@@ -62,7 +74,7 @@ function removeStandardPreviewWidgetsSoon(node) {
   }
 
   setTimeout(() => removeStandardPreviewWidgets(node), 0);
-  setTimeout(() => removeStandardPreviewWidgets(node), 50);
+  setTimeout(() => removeStandardPreviewWidgets(node), STANDARD_PREVIEW_CLEANUP_DELAY_MS);
 }
 
 function imageDataToUrl(data) {
@@ -94,7 +106,7 @@ function unwrapSingle(value) {
   let current = value;
   let guard = 0;
 
-  while (Array.isArray(current) && current.length === 1 && guard < 10) {
+  while (Array.isArray(current) && current.length === 1 && guard < MAX_UNWRAP_DEPTH) {
     const only = current[0];
     if (isImageMeta(only)) break;
     current = only;
@@ -225,18 +237,24 @@ function imageCacheForNode(node) {
   return node.__mpImageCache;
 }
 
+function trimImageCache(cache) {
+  while (cache.size > MAX_IMAGE_CACHE_ENTRIES) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey === undefined) return;
+    cache.delete(oldestKey);
+  }
+}
+
 function makeImageEntry(node, data, index) {
   const key = imageCacheKey(data);
   const cache = imageCacheForNode(node);
-  let entry = cache.get(key);
+  let cached = cache.get(key);
 
-  if (!entry) {
+  if (!cached) {
     const url = imageDataToUrl(data);
     const img = new Image();
 
-    entry = {
-      data,
-      index,
+    cached = {
       url,
       img,
       loaded: false,
@@ -245,13 +263,13 @@ function makeImageEntry(node, data, index) {
     };
 
     img.onload = () => {
-      entry.loaded = true;
-      entry.error = false;
+      cached.loaded = true;
+      cached.error = false;
 
-      const waiters = entry.waiters.splice(0);
+      const waiters = cached.waiters.splice(0);
       for (const waiter of waiters) {
         try {
-          waiter(entry);
+          waiter(cached);
         } catch (error) {
           console.warn("[MultiPreview] image load waiter failed", error);
         }
@@ -261,12 +279,12 @@ function makeImageEntry(node, data, index) {
     };
 
     img.onerror = () => {
-      entry.error = true;
+      cached.error = true;
 
-      const waiters = entry.waiters.splice(0);
+      const waiters = cached.waiters.splice(0);
       for (const waiter of waiters) {
         try {
-          waiter(entry);
+          waiter(cached);
         } catch (error) {
           console.warn("[MultiPreview] image error waiter failed", error);
         }
@@ -277,12 +295,29 @@ function makeImageEntry(node, data, index) {
     };
 
     img.src = url;
-    cache.set(key, entry);
+    cache.set(key, cached);
+    trimImageCache(cache);
+  } else {
+    // Refresh insertion order so the Map behaves like a tiny LRU cache.
+    cache.delete(key);
+    cache.set(key, cached);
   }
 
-  entry.data = data;
-  entry.index = index;
-  return entry;
+  // Return a per-display entry so duplicate images in different pins/batch
+  // positions do not overwrite each other's index metadata.
+  return {
+    data,
+    index,
+    url: cached.url,
+    img: cached.img,
+    get loaded() {
+      return cached.loaded;
+    },
+    get error() {
+      return cached.error;
+    },
+    waiters: cached.waiters,
+  };
 }
 
 function preloadImages(node, images) {
@@ -714,8 +749,9 @@ function ensureWidgets(node) {
 
     reconcileDynamicInputs(node);
 
-    node.size[0] = Math.max(node.size?.[0] || 0, 320);
-    node.size[1] = Math.max(node.size?.[1] || 0, 390);
+    node.size ??= [DEFAULT_NODE_WIDTH, DEFAULT_NODE_HEIGHT];
+    node.size[0] = Math.max(node.size[0] || 0, DEFAULT_NODE_WIDTH);
+    node.size[1] = Math.max(node.size[1] || 0, DEFAULT_NODE_HEIGHT);
   } else {
     reconcileDynamicInputs(node);
   }
@@ -862,17 +898,17 @@ function connectedImageInputsFromLiveNode(nodeId, promptNode) {
 }
 
 function removeAllImageDependencies(promptNode) {
-  // Keep parent MultiPreview image dependencies intact.
+  // Intentional no-op.
   //
-  // Earlier phase8-clean removed imageN dependencies from the parent prompt node
-  // so the parent would not wait for all inputs. That made internal receivers
-  // the only update path, but it also broke node-level execution paths where
-  // the injected internal receivers are not executed/reported.
+  // Earlier builds removed imageN dependencies from the parent prompt node so
+  // the parent would not wait for all inputs. That made internal receivers the
+  // only update path, but it broke node-level execution paths where injected
+  // receivers are not executed/reported.
   //
-  // Keeping imageN here provides a safe fallback:
+  // Keeping imageN provides a fallback:
   // - internal receivers still update the preview immediately
   // - parent MultiPreview still executes normally at the end
-  // - node execute button can display via the direct parent path
+  // - node execute button can display through the direct parent path
   void promptNode;
 }
 
@@ -938,6 +974,9 @@ function injectInternalReceiversIntoPrompt(prompt) {
 }
 
 function patchQueuePromptOnce() {
+  // Use multiple hook points because ComfyUI frontend versions and execution
+  // paths differ. injectedPromptObjects prevents duplicate injection for the
+  // same prompt object when more than one hook fires.
   if (api && typeof api.queuePrompt === "function" && !api.__mpQueuePromptPatched) {
     const originalApiQueuePrompt = api.queuePrompt.bind(api);
 
@@ -1020,6 +1059,9 @@ app.registerExtension({
     };
 
     nodeType.prototype.onExecuted = function (output, ...args) {
+      // Intentionally do not call original PreviewImage.onExecuted.
+      // MultiPreview manages node.images/node.imgs directly and removes the
+      // standard preview widget to avoid duplicate previews.
       void originalOnExecuted;
       void args;
 
