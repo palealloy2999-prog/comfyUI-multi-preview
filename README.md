@@ -227,3 +227,11 @@ No-input execution display behavior adjustment.
 - If a previously executed MultiPreview is run after all image inputs are disconnected, the current preview display is preserved while the node turns red
 - If a fresh MultiPreview with no previous preview is run without image inputs, it simply turns red with no preview image
 - Keeps per-pin batch index state when entering the no-input error state
+
+
+## v1.2.16
+
+Error message adjustment.
+
+- Changes the no-input execution error message to `Required input is missing: images`
+- Keeps the v1.2.15 behavior where a previously displayed preview remains visible while the node turns red

@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const VERSION = "v1.2.15";
+const VERSION = "v1.2.16";
 const NODE_NAME = "MultiPreview";
 const AUTO_NODE_NAME = "MultiPreviewAuto";
 const INTERNAL_RECEIVER_NODE_NAME = "MultiPreviewInternalReceiver";
