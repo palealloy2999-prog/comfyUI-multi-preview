@@ -3,14 +3,14 @@ from server import PromptServer
 from nodes import PreviewImage
 
 
-VERSION = "v1.1.0"
+VERSION = "v1.2.0"
 
 # Keep this value in sync with MAX_PINS in web/multiPreview.js.
 MAX_PINS = 32
 
 
 class MultiPreview(PreviewImage):
-    """MultiPreview v1.1.0.
+    """MultiPreview v1.2.0.
 
     Parent node with dynamic image pins. During queueing, imageN dependencies
     are replaced by injected MultiPreviewInternalReceiver nodes on the frontend.
@@ -70,6 +70,19 @@ class MultiPreview(PreviewImage):
         }
 
 
+
+
+class MultiPreviewAuto(MultiPreview):
+    """Auto-updating MultiPreview without buttons or manual pin switching.
+
+    It uses the same dynamic image pins and internal receiver mechanism as
+    MultiPreview, but the frontend always displays the most recently updated
+    pin and does not create pin buttons.
+    """
+
+    DESCRIPTION = "Auto-updating MultiPreview without pin buttons."
+
+
 class MultiPreviewInternalReceiver(PreviewImage):
     """Internal receiver injected into the execution prompt by JS.
 
@@ -127,10 +140,12 @@ class MultiPreviewInternalReceiver(PreviewImage):
 
 NODE_CLASS_MAPPINGS = {
     "MultiPreview": MultiPreview,
+    "MultiPreviewAuto": MultiPreviewAuto,
     "MultiPreviewInternalReceiver": MultiPreviewInternalReceiver,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "MultiPreview": "MultiPreview",
+    "MultiPreviewAuto": "MultiPreview Auto",
     "MultiPreviewInternalReceiver": "MultiPreviewInternalReceiver",
 }

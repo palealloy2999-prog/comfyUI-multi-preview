@@ -1,8 +1,9 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const VERSION = "v1.1.0";
+const VERSION = "v1.2.0";
 const NODE_NAME = "MultiPreview";
+const AUTO_NODE_NAME = "MultiPreviewAuto";
 const INTERNAL_RECEIVER_NODE_NAME = "MultiPreviewInternalReceiver";
 
 // Keep this value in sync with MAX_PINS in nodes.py.
@@ -29,6 +30,14 @@ function requestResizeAndRedraw(node) {
     node.setSize(node.size);
   }
   requestRedraw(node);
+}
+
+function isManagedPreviewNodeName(name) {
+  return name === NODE_NAME || name === AUTO_NODE_NAME;
+}
+
+function isAutoPreviewNode(node) {
+  return node?.type === AUTO_NODE_NAME || node?.comfyClass === AUTO_NODE_NAME;
 }
 
 function isOurWidget(widget) {
@@ -367,6 +376,8 @@ function setSelectedPin(node, pinKey) {
 }
 
 function getAutoSwitchLatest(node) {
+  if (isAutoPreviewNode(node)) return true;
+
   node.properties ??= {};
   return node.properties.auto_switch_latest === true;
 }
@@ -448,6 +459,8 @@ function connectedInputPinKeys(node) {
 }
 
 function buttonPinKeys(node) {
+  if (isAutoPreviewNode(node)) return [];
+
   // Dynamic inputs include one extra empty pin for the next connection.
   // Buttons should be shown for:
   // - currently connected pins
@@ -685,6 +698,11 @@ function selectPin(node, pinKey, options = {}) {
 function ensureAutoSwitchWidget(node) {
   node.widgets ??= [];
 
+  if (isAutoPreviewNode(node)) {
+    node.widgets = node.widgets.filter((widget) => !widget.__mpAutoSwitchWidget);
+    return;
+  }
+
   let widget = node.widgets.find((w) => w.__mpAutoSwitchWidget);
   if (widget) {
     widget.value = getAutoSwitchLatest(node);
@@ -706,6 +724,12 @@ function ensureAutoSwitchWidget(node) {
 
 function ensureButtonWidgetsForPins(node) {
   node.widgets ??= [];
+
+  if (isAutoPreviewNode(node)) {
+    node.widgets = node.widgets.filter((widget) => !widget.__mpPinKey);
+    updateButtonLabels(node);
+    return;
+  }
 
   const validPins = buttonPinKeys(node);
 
@@ -933,7 +957,7 @@ function injectInternalReceiversIntoPrompt(prompt) {
 
   for (const [nodeId, node] of Object.entries(prompt)) {
     if (!isPromptNodeObject(node)) continue;
-    if (node.class_type !== NODE_NAME) continue;
+    if (!isManagedPreviewNodeName(node.class_type)) continue;
 
     const connectedPins = connectedImageInputsFromLiveNode(nodeId, node);
     const liveNode = findNodeById(nodeId);
@@ -1020,7 +1044,7 @@ app.registerExtension({
   },
 
   async beforeRegisterNodeDef(nodeType, nodeData) {
-    if (nodeData.name !== NODE_NAME) return;
+    if (!isManagedPreviewNodeName(nodeData.name)) return;
 
     const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
     const originalOnConfigure = nodeType.prototype.onConfigure;
@@ -1047,7 +1071,7 @@ app.registerExtension({
         reconcileConnectedPinIndexState(this);
 
         const selectedPin = getSelectedPin(this);
-        if (!buttonPinKeys(this).includes(selectedPin)) {
+        if (!isAutoPreviewNode(this) && !buttonPinKeys(this).includes(selectedPin)) {
           setSelectedPin(this, firstAvailablePin(this));
         }
 

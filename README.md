@@ -57,9 +57,6 @@ Image source A ──▶ image1
 Image source B ──▶ image2
 Image source C ──▶ image3
 ```
-<img width="406" height="633" alt="image" src="https://github.com/user-attachments/assets/ec0e2de7-bfe1-4677-83e3-30a81b9f7e06" />
-
-
 
 MultiPreview will show a button for each connected image pin.
 
@@ -76,6 +73,31 @@ The `auto_latest` toggle controls whether the preview should automatically switc
 
 ## Notes
 
-MultiPreview uses internal receiver nodes during execution to update previews as soon as each input finishes.
+MultiPreview injects internal receiver nodes at execution time. These receivers save per-pin preview images and notify the frontend with a custom event so the parent MultiPreview node can update immediately.
 
-These internal receiver nodes are injected automatically at execution time and do not need to be placed manually.
+The internal receiver nodes are injected automatically and do not need to be placed manually.
+
+## v1.2.0
+
+Added an auto-updating display-only node.
+
+- Unified release version strings
+- Added constants for default node size, unwrap depth, cleanup delay, and cache size
+- Added safer `node.size` initialization
+- Added a small image cache limit
+- Made image cache entries safer for duplicate image metadata
+- Narrowed standard-preview-widget cleanup matching
+- Added comments for ComfyUI lifecycle workarounds and intentional prompt hooks
+
+
+## MultiPreview Auto
+
+`MultiPreview Auto` is a simplified node variant.
+
+- Dynamic image pins only
+- No pin buttons
+- No manual preview switching
+- Always switches to the pin that most recently received an image
+- Uses the same internal receiver mechanism as `MultiPreview`
+
+Use this node when you only want a compact live preview of the latest completed branch.
