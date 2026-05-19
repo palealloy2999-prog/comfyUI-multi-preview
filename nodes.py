@@ -4,7 +4,7 @@ from server import PromptServer
 from nodes import PreviewImage
 
 
-VERSION = "v1.2.7-debug"
+VERSION = "v1.2.15"
 
 # Keep this value in sync with MAX_PINS in web/multiPreview.js.
 MAX_PINS = 32
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class MultiPreview(PreviewImage):
-    """MultiPreview v1.2.7-debug.
+    """MultiPreview v1.2.15.
 
     Parent node with dynamic image pins. During queueing, imageN dependencies
     are replaced by injected MultiPreviewInternalReceiver nodes on the frontend.
@@ -74,7 +74,7 @@ class MultiPreview(PreviewImage):
                 pin_images[str(index)] = saved_images
 
         if not pin_images:
-            return {"ui": {"mp_noop": ["1"], "mp_version": [VERSION]}}
+            raise RuntimeError("MultiPreview requires at least one connected image input.")
 
         # Return both object and JSON payloads for frontend compatibility across
         # ComfyUI frontend serialization paths.

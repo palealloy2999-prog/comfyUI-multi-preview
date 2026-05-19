@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const VERSION = "v1.2.7-debug";
+const VERSION = "v1.2.15";
 const NODE_NAME = "MultiPreview";
 const AUTO_NODE_NAME = "MultiPreviewAuto";
 const INTERNAL_RECEIVER_NODE_NAME = "MultiPreviewInternalReceiver";
@@ -16,10 +16,10 @@ const STANDARD_PREVIEW_CLEANUP_DELAY_MS = 50;
 const MAX_IMAGE_CACHE_ENTRIES = 128;
 const STATE_PERSIST_INTERVAL_MS = 1000;
 const ENABLE_PERIODIC_STATE_PERSIST = false;
-const GLOBAL_STATE_STORE_KEY = "__multiPreviewStateStore_v1";
+const GLOBAL_STATE_STORE_KEY = "__multiPreviewStateStore_v2";
 
-// Debug build: set to false if the logs become too noisy.
-const DEBUG = true;
+// Set to true when diagnosing state restoration issues.
+const DEBUG = false;
 
 function mpNodeLabel(node) {
   if (!node) return "node:null";
@@ -80,11 +80,66 @@ function globalStateStore() {
   return globalThis[GLOBAL_STATE_STORE_KEY];
 }
 
+function graphIdentityForNode(node) {
+  const graph = node?.graph;
+  if (!graph) return "graph:unknown";
+
+  // Subgraphs usually have a stable id. The root graph may not; in that case
+  // use "root" and rely on the connection snapshot check to avoid stale
+  // cross-workflow restores.
+  return String(graph.id ?? graph.graphId ?? graph.uuid ?? "root");
+}
+
 function previewStateKey(node) {
   if (!node || node.id == null) return null;
 
   const type = node.type || node.comfyClass || "MultiPreview";
-  return `${type}:${node.id}`;
+  return `${graphIdentityForNode(node)}:${type}:${node.id}`;
+}
+
+function graphLinkById(graph, linkId) {
+  const links = graph?.links;
+  if (!links || linkId == null) return null;
+
+  if (typeof links.get === "function") {
+    return links.get(linkId) || null;
+  }
+
+  return links[linkId] || null;
+}
+
+function currentConnectedPinSnapshot(node) {
+  return getImageInputs(node)
+    .filter(({ input }) => isInputConnected(input))
+    .map(({ input, num }) => {
+      const link = graphLinkById(node.graph, input.link);
+      const originId = link?.origin_id ?? link?.originId ?? null;
+      const originNode =
+        originId != null && typeof node.graph?.getNodeById === "function"
+          ? node.graph.getNodeById(Number(originId))
+          : null;
+
+      return {
+        pin: String(num),
+        link: input.link != null ? String(input.link) : "",
+        origin_id: originId != null ? String(originId) : "",
+        origin_slot: link?.origin_slot != null ? String(link.origin_slot) : "",
+        origin_type: String(originNode?.type || originNode?.comfyClass || ""),
+      };
+    })
+    .sort((a, b) => Number(a.pin) - Number(b.pin));
+}
+
+function snapshotPinKeys(snapshot) {
+  return (snapshot || [])
+    .map((item) => (typeof item === "object" ? item.pin : item))
+    .filter((pin) => pin != null)
+    .map((pin) => String(pin))
+    .sort((a, b) => Number(a) - Number(b));
+}
+
+function sameConnectionSnapshot(a, b) {
+  return JSON.stringify(a || []) === JSON.stringify(b || []);
 }
 
 function candidateGraphs() {
@@ -127,9 +182,10 @@ function saveNodeState(node) {
     selectedPin: getSelectedPin(node),
     pinImages: clonePlainObject(node.__mpPinImages || emptyPinImages()),
     pinImageIndex: clonePlainObject(node.__mpPinImageIndex || {}),
-    connectedPinSnapshot: clonePlainObject(node.__mpConnectedPinSnapshot || []),
+    connectedPinSnapshot: clonePlainObject(currentConnectedPinSnapshot(node)),
     imageIndex: Number.isInteger(node.imageIndex) ? node.imageIndex : 0,
     timestamp: Date.now(),
+    cleared: false,
   };
 
   const store = globalStateStore();
@@ -175,6 +231,23 @@ function saveNodeState(node) {
   });
 }
 
+function saveNodeStateSoon(node) {
+  if (!node || node.__mpSaveStateScheduled) return;
+
+  node.__mpSaveStateScheduled = true;
+
+  const run = () => {
+    node.__mpSaveStateScheduled = false;
+    saveNodeState(node);
+  };
+
+  if (typeof queueMicrotask === "function") {
+    queueMicrotask(run);
+  } else {
+    Promise.resolve().then(run);
+  }
+}
+
 function restoreNodeState(node) {
   if (!node) return false;
 
@@ -193,6 +266,28 @@ function restoreNodeState(node) {
       key,
       node: mpNodeLabel(node),
       storeKeys: [...globalStateStore().keys()],
+    });
+    return false;
+  }
+
+  if (state.cleared === true) {
+    mpLog("restoreNodeState: skipped - state explicitly cleared", { key, node: mpNodeLabel(node) });
+    return false;
+  }
+
+  const currentSnapshot = currentConnectedPinSnapshot(node);
+  const cachedSnapshot = state.connectedPinSnapshot || [];
+
+  // Avoid restoring images from another workflow/tab that happens to reuse the
+  // same node id. During graph setup the current snapshot may be empty, so only
+  // reject when both sides have concrete connection data and they differ.
+  if (currentSnapshot.length > 0 && cachedSnapshot.length > 0 && !sameConnectionSnapshot(currentSnapshot, cachedSnapshot)) {
+    globalStateStore().delete(key);
+    mpLog("restoreNodeState: skipped - connection snapshot mismatch", {
+      key,
+      node: mpNodeLabel(node),
+      currentSnapshot,
+      cachedSnapshot,
     });
     return false;
   }
@@ -391,6 +486,8 @@ function removeStandardPreviewWidgetsSoon(node) {
 
   setTimeout(() => removeStandardPreviewWidgets(node), 0);
   setTimeout(() => removeStandardPreviewWidgets(node), STANDARD_PREVIEW_CLEANUP_DELAY_MS);
+  setTimeout(() => removeStandardPreviewWidgets(node), 150);
+  setTimeout(() => removeStandardPreviewWidgets(node), 500);
 }
 
 function imageDataToUrl(data) {
@@ -699,6 +796,36 @@ function pinImageIndexMap(node) {
   return node.__mpPinImageIndex;
 }
 
+function installImageIndexTracker(node) {
+  if (!node || node.__mpImageIndexTrackerInstalled) return;
+
+  const descriptor = Object.getOwnPropertyDescriptor(node, "imageIndex");
+  if (descriptor && descriptor.configurable === false) return;
+
+  let current = Number.isInteger(node.imageIndex) ? node.imageIndex : 0;
+
+  Object.defineProperty(node, "imageIndex", {
+    configurable: true,
+    enumerable: true,
+    get() {
+      return current;
+    },
+    set(value) {
+      const next = Number.isInteger(value) ? value : 0;
+      current = Math.max(0, next);
+
+      const pinKey = getSelectedPin(node);
+      if (pinKey && hasImagesForPin(node, pinKey)) {
+        pinImageIndexMap(node)[String(pinKey)] = current;
+        saveNodeStateSoon(node);
+      }
+    },
+  });
+
+  node.__mpImageIndexTrackerInstalled = true;
+  node.imageIndex = current;
+}
+
 function saveCurrentPinIndex(node) {
   const pinKey = getSelectedPin(node);
   if (!pinKey) return;
@@ -721,23 +848,30 @@ function clearStoredPinIndex(node, pinKey) {
 }
 
 function reconcileConnectedPinIndexState(node) {
-  const prev = new Set((node.__mpConnectedPinSnapshot || []).map((x) => String(x)));
-  const next = new Set(connectedInputPinKeys(node));
+  const previousSnapshot = node.__mpConnectedPinSnapshot || [];
+  const prevPins = new Set(snapshotPinKeys(previousSnapshot));
+  const nextSnapshot = currentConnectedPinSnapshot(node);
+  const nextPins = new Set(snapshotPinKeys(nextSnapshot));
+  const hasPreviousSnapshot = previousSnapshot.length > 0;
 
   // Reset per-pin batch index when a pin is attached or detached.
-  for (const pinKey of next) {
-    if (!prev.has(pinKey)) {
-      clearStoredPinIndex(node, pinKey);
+  // Do not treat the initial graph/configure pass as an attach event; otherwise
+  // restored per-pin batch indexes can be cleared before the preview is drawn.
+  if (hasPreviousSnapshot) {
+    for (const pinKey of nextPins) {
+      if (!prevPins.has(pinKey)) {
+        clearStoredPinIndex(node, pinKey);
+      }
+    }
+
+    for (const pinKey of prevPins) {
+      if (!nextPins.has(pinKey)) {
+        clearStoredPinIndex(node, pinKey);
+      }
     }
   }
 
-  for (const pinKey of prev) {
-    if (!next.has(pinKey)) {
-      clearStoredPinIndex(node, pinKey);
-    }
-  }
-
-  node.__mpConnectedPinSnapshot = [...next].sort((a, b) => Number(a) - Number(b));
+  node.__mpConnectedPinSnapshot = nextSnapshot;
 }
 
 function getPinNumberFromInput(input) {
@@ -877,16 +1011,93 @@ function firstAvailablePin(node) {
   return keys.find((pinKey) => hasImagesForPin(node, pinKey)) || keys[0] || "1";
 }
 
+
+function clearPreviewState(node, { clearCache = false } = {}) {
+  if (!node) return;
+
+  node.__mpPinImages = emptyPinImages();
+  node.__mpEntries = [];
+  node.__mpPinImageIndex = {};
+  node.__mpConnectedPinSnapshot = currentConnectedPinSnapshot(node);
+  node.__mpPendingSelectionToken = null;
+  // Do not set node.imgs/node.images to an empty array.
+  // ComfyUI's standard image preview widget can still exist for a short moment
+  // and may read imgs[0].naturalWidth. An empty array can crash that path.
+  //
+  // Also do not replace the preview with a 1x1 dummy. If a standard preview
+  // widget is still visible during the failing/no-input execution, keep the
+  // previous non-empty imgs array, matching normal Preview Image behavior.
+  if (!Array.isArray(node.imgs) || node.imgs.length === 0) {
+    delete node.imgs;
+  }
+  if (!Array.isArray(node.images) || node.images.length === 0) {
+    delete node.images;
+  }
+
+  // Preserve node.imageIndex here. If ComfyUI marks the node red because the
+  // user executed it with no connected inputs, keeping the previous imageIndex
+  // matches normal Preview Image behavior and avoids jumping back to page 1.
+  node.overIndex = null;
+
+  // Also clear legacy app.nodeOutputs image fields when available, so restore
+  // paths do not rediscover stale images for this node.
+  const output = app?.nodeOutputs?.[String(node.id)];
+  if (output) {
+    delete output.images;
+    delete output.gifs;
+  }
+
+  if (clearCache) {
+    const key = previewStateKey(node);
+    if (key) {
+      globalStateStore().set(key, {
+        selectedPin: getSelectedPin(node),
+        pinImages: emptyPinImages(),
+        pinImageIndex: {},
+        connectedPinSnapshot: clonePlainObject(currentConnectedPinSnapshot(node)),
+        imageIndex: Number.isInteger(node.imageIndex) ? node.imageIndex : 0,
+        timestamp: Date.now(),
+        cleared: true,
+      });
+    }
+  }
+
+  ensureButtonWidgetsForPins(node);
+  updateButtonLabels(node);
+  removeStandardPreviewWidgetsSoon(node);
+  requestRedraw(node);
+}
+
 function prepareNodeStateForRun(node, activePinKeys) {
   if (!node) return;
 
   const active = new Set((activePinKeys || []).map((key) => String(key)));
 
+  if (active.size === 0) {
+    // No connected image inputs.
+    //
+    // If this node already has a previous preview, keep the current visual state
+    // and let the Python node raise an execution error so ComfyUI marks it red,
+    // matching normal Preview Image behavior.
+    //
+    // If this is a fresh node with no previous preview, there is simply nothing
+    // to display; the Python-side execution error still marks it red.
+    saveCurrentPinIndex(node);
+    if (countPinImages(node.__mpPinImages || emptyPinImages()) > 0) {
+      saveNodeState(node);
+    }
+    updateButtonLabels(node);
+    requestRedraw(node);
+    return;
+  }
+
   node.__mpPinImages ??= emptyPinImages();
+  node.__mpPinImageIndex ??= {};
 
   for (const key of Object.keys(node.__mpPinImages)) {
     if (!active.has(String(key))) {
       delete node.__mpPinImages[key];
+      delete node.__mpPinImageIndex[key];
     }
   }
 
@@ -895,6 +1106,8 @@ function prepareNodeStateForRun(node, activePinKeys) {
     setSelectedPin(node, firstAvailablePin(node));
   }
 
+  node.__mpConnectedPinSnapshot = currentConnectedPinSnapshot(node);
+  saveNodeState(node);
   updateButtonLabels(node);
   requestRedraw(node);
 }
@@ -1101,6 +1314,8 @@ function ensureWidgets(node) {
   node.properties ??= {};
   node.properties.selected_pin ??= "1";
   node.properties.auto_switch_latest ??= false;
+
+  installImageIndexTracker(node);
 
   restoreNodeState(node);
 
@@ -1514,6 +1729,7 @@ app.registerExtension({
       removeStandardPreviewWidgetsSoon(this);
 
       const pinImages = extractPinImages(output);
+
       if (countPinImages(pinImages) > 0) {
         // Direct parent execution is a completed run result, so replace the
         // previous run state instead of keeping stale disconnected pins.

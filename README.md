@@ -87,7 +87,7 @@ MultiPreview uses ComfyUI's standard temporary preview image mechanism through `
 
 This means preview files are handled in the same general way as standard ComfyUI preview nodes.
 
-## v1.2.7-debug
+## v1.2.8
 
 Maintenance release with a guarded state cache for ComfyUI tab/view switching.
 
@@ -141,15 +141,89 @@ This debug build enables verbose console logging for MultiPreview lifecycle, sta
 Search the browser console for:
 
 ```txt
-[MultiPreview v1.2.7-debug]
+[MultiPreview v1.2.8]
 ```
 
 
 ### Debug log noise reduction
 
-v1.2.7-debug disables the 1-second periodic persistence log by default. State is still saved on receiver updates, pin selection, lifecycle events, blur, visibilitychange, and beforeunload.
+v1.2.8 disables the 1-second periodic persistence log by default. State is still saved on receiver updates, pin selection, lifecycle events, blur, visibilitychange, and beforeunload.
 
 
 ### Restore retry fix
 
-v1.2.7-debug allows state restoration to run again when a tab/view switch clears the live pin image state while cached preview images still exist.
+v1.2.8 allows state restoration to run again when a tab/view switch clears the live pin image state while cached preview images still exist.
+
+
+## v1.2.8
+
+Stale preview cleanup and state-cache safety release.
+
+- Clears preview images, node image arrays, and restore cache when executing with no connected image inputs
+- Prevents all-disconnected runs from restoring stale previews
+- Adds connection snapshot checks before restoring cached preview state
+- Includes graph identity in the state cache key when available
+- Disables verbose debug logging by default
+
+
+## v1.2.9
+
+Batch index retention fix.
+
+- Tracks `node.imageIndex` changes and immediately stores the current batch index for the selected pin
+- Prevents the initial graph/configure pass from clearing restored per-pin batch indexes
+
+
+## v1.2.10
+
+Clear-preview crash fix.
+
+- Fixes a crash when executing MultiPreview after disconnecting all image inputs
+- Clears `node.imgs` / `node.images` by deleting the properties instead of assigning empty arrays
+- Keeps the v1.2.9 batch index retention fix
+
+
+## v1.2.11
+
+Clear-preview safety placeholder fix.
+
+- Uses a transparent 1x1 placeholder instead of an empty `node.imgs` state while ComfyUI's standard preview widget is being removed
+- Extends delayed cleanup for asynchronously recreated standard preview widgets
+- Clears legacy `app.nodeOutputs` image fields when available
+
+
+## v1.2.12
+
+Clear-preview behavior adjustment.
+
+- Removes the transparent 1x1 placeholder used in v1.2.11
+- Does not assign empty `node.imgs` / `node.images` arrays when all image inputs are disconnected
+- Keeps the previous non-empty preview array briefly if ComfyUI's standard preview widget is still visible, matching normal Preview Image behavior
+- Keeps stale restore cache suppressed for all-disconnected runs
+
+
+## v1.2.13
+
+Batch index cache timing fix.
+
+- Saves the selected pin's batch index to the restore cache immediately after `node.imageIndex` changes
+- Uses a microtask-based `saveNodeStateSoon()` to avoid losing the latest batch page during fast tab/view switching
+- Keeps the v1.2.12 all-disconnected clear behavior
+
+
+## v1.2.14
+
+No-input execution behavior fix.
+
+- Raises an execution error when MultiPreview runs with no connected image inputs, so the node turns red like ComfyUI's normal Preview Image behavior
+- Preserves the current visible batch page when clearing stale preview state after all inputs are disconnected
+- Keeps stale restore cache suppression and batch index cache timing fixes
+
+
+## v1.2.15
+
+No-input execution display behavior adjustment.
+
+- If a previously executed MultiPreview is run after all image inputs are disconnected, the current preview display is preserved while the node turns red
+- If a fresh MultiPreview with no previous preview is run without image inputs, it simply turns red with no preview image
+- Keeps per-pin batch index state when entering the no-input error state
