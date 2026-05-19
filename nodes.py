@@ -1,16 +1,19 @@
 import json
+import logging
 from server import PromptServer
 from nodes import PreviewImage
 
 
-VERSION = "v1.2.0"
+VERSION = "v1.2.1"
 
 # Keep this value in sync with MAX_PINS in web/multiPreview.js.
 MAX_PINS = 32
 
+logger = logging.getLogger(__name__)
+
 
 class MultiPreview(PreviewImage):
-    """MultiPreview v1.2.0.
+    """MultiPreview v1.2.1.
 
     Parent node with dynamic image pins. During queueing, imageN dependencies
     are replaced by injected MultiPreviewInternalReceiver nodes on the frontend.
@@ -40,20 +43,32 @@ class MultiPreview(PreviewImage):
         if images is None:
             return []
 
-        result = self.save_images(
-            images,
-            filename_prefix=f"MultiPreview_pin{pin_index}",
-            prompt=prompt,
-            extra_pnginfo=extra_pnginfo,
-        )
+        try:
+            result = self.save_images(
+                images,
+                filename_prefix=f"MultiPreview_pin{pin_index}",
+                prompt=prompt,
+                extra_pnginfo=extra_pnginfo,
+            )
+        except Exception:
+            logger.exception("MultiPreview failed to save images for pin %s", pin_index)
+            raise
+
         return result.get("ui", {}).get("images", [])
 
     def preview(self, prompt=None, extra_pnginfo=None, **kwargs):
         pin_images = {}
 
-        for index in range(1, MAX_PINS + 1):
-            key = f"image{index}"
-            images = kwargs.get(key, None)
+        image_items = sorted(
+            (
+                (int(key[5:]), images)
+                for key, images in kwargs.items()
+                if key.startswith("image") and key[5:].isdigit() and images is not None
+            ),
+            key=lambda item: item[0],
+        )
+
+        for index, images in image_items:
             saved_images = self._save_pin_images(images, index, prompt, extra_pnginfo)
             if saved_images:
                 pin_images[str(index)] = saved_images
@@ -61,6 +76,8 @@ class MultiPreview(PreviewImage):
         if not pin_images:
             return {"ui": {"mp_noop": ["1"], "mp_version": [VERSION]}}
 
+        # Return both object and JSON payloads for frontend compatibility across
+        # ComfyUI frontend serialization paths.
         return {
             "ui": {
                 "mp_images": [pin_images],
@@ -110,15 +127,28 @@ class MultiPreviewInternalReceiver(PreviewImage):
     DESCRIPTION = "Internal receiver injected by MultiPreview JS."
 
     def receive(self, image, parent_id=0, pin=1, prompt=None, extra_pnginfo=None):
-        parent_id = int(parent_id)
-        pin = int(pin)
+        try:
+            parent_id = int(parent_id)
+            pin = int(pin)
+        except (TypeError, ValueError):
+            logger.exception("MultiPreviewInternalReceiver received invalid parent_id or pin")
+            raise
 
-        result = self.save_images(
-            image,
-            filename_prefix=f"MultiPreviewInternalReceiver_parent{parent_id}_pin{pin}",
-            prompt=prompt,
-            extra_pnginfo=extra_pnginfo,
-        )
+        try:
+            result = self.save_images(
+                image,
+                filename_prefix=f"MultiPreviewInternalReceiver_parent{parent_id}_pin{pin}",
+                prompt=prompt,
+                extra_pnginfo=extra_pnginfo,
+            )
+        except Exception:
+            logger.exception(
+                "MultiPreviewInternalReceiver failed to save images for parent=%s pin=%s",
+                parent_id,
+                pin,
+            )
+            raise
+
         images = result.get("ui", {}).get("images", [])
 
         payload = {
@@ -129,6 +159,8 @@ class MultiPreviewInternalReceiver(PreviewImage):
 
         PromptServer.instance.send_sync("multi_preview_receiver", payload)
 
+        # Return both object and JSON payloads for frontend compatibility across
+        # ComfyUI frontend serialization paths.
         return {
             "ui": {
                 "mp_receiver": [payload],

@@ -1,5 +1,7 @@
 # ComfyUI MultiPreview
 
+[日本語版はこちら / Japanese README](./README.ja.md)
+
 MultiPreview is a custom ComfyUI node for previewing multiple image inputs in a single node.
 
 It supports dynamic image pins, per-pin preview switching, batch image navigation, and immediate preview updates while a workflow is running.
@@ -58,6 +60,8 @@ Image source B ──▶ image2
 Image source C ──▶ image3
 ```
 
+<img width="406" height="633" alt="MultiPreview screenshot" src="https://github.com/user-attachments/assets/ec0e2de7-bfe1-4677-83e3-30a81b9f7e06" />
+
 MultiPreview will show a button for each connected image pin.
 
 Click a button to switch the preview target.
@@ -77,17 +81,22 @@ MultiPreview injects internal receiver nodes at execution time. These receivers 
 
 The internal receiver nodes are injected automatically and do not need to be placed manually.
 
-## v1.2.0
+## Temporary Preview Files
 
-Added an auto-updating display-only node.
+MultiPreview uses ComfyUI's standard temporary preview image mechanism through `PreviewImage.save_images()`.
 
-- Unified release version strings
-- Added constants for default node size, unwrap depth, cleanup delay, and cache size
-- Added safer `node.size` initialization
-- Added a small image cache limit
-- Made image cache entries safer for duplicate image metadata
-- Narrowed standard-preview-widget cleanup matching
-- Added comments for ComfyUI lifecycle workarounds and intentional prompt hooks
+This means preview files are handled in the same general way as standard ComfyUI preview nodes.
+
+## v1.2.1
+
+Maintenance release with small cleanup and documentation improvements.
+
+- Cleaned up unused/no-op JavaScript helpers
+- Simplified widget initialization flow
+- Added comments for fallback paths and hook behavior
+- Improved Python-side image input scanning
+- Added logging around image save failures
+- Added documentation for temporary preview files
 
 
 ## MultiPreview Auto

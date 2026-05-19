@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const VERSION = "v1.2.0";
+const VERSION = "v1.2.1";
 const NODE_NAME = "MultiPreview";
 const AUTO_NODE_NAME = "MultiPreviewAuto";
 const INTERNAL_RECEIVER_NODE_NAME = "MultiPreviewInternalReceiver";
@@ -480,10 +480,6 @@ function receivedPinKeys(node) {
   return keys.sort((a, b) => Number(a) - Number(b));
 }
 
-function currentPinKeys(node) {
-  const keys = new Set([...inputPinKeys(node), ...receivedPinKeys(node)]);
-  return [...keys].sort((a, b) => Number(a) - Number(b));
-}
 
 function findImageInputIndex(node, pinNumber) {
   return (node.inputs || []).findIndex((input) => getPinNumberFromInput(input) === Number(pinNumber));
@@ -535,19 +531,14 @@ function desiredInputCount(node) {
   return Math.min(MAX_PINS, maxConnected + 1);
 }
 
-function clearDisconnectedPinImages(node) {
-  // Do not clear on connection changes.
-  // Preserve the current preview state until the next execution starts.
-  void node;
-}
 
 function reconcileDynamicInputs(node) {
   if (!node || node.__mpReconcilingPins) return;
   node.__mpReconcilingPins = true;
 
   try {
-    clearDisconnectedPinImages(node);
-
+    // Do not clear disconnected pin previews here.
+    // They are intentionally preserved until the next execution starts.
     const desiredCount = desiredInputCount(node);
 
     for (let num = 1; num <= desiredCount; num += 1) {
@@ -771,14 +762,12 @@ function ensureWidgets(node) {
   if (!node.__mpWidgetsReady) {
     node.__mpWidgetsReady = true;
 
-    reconcileDynamicInputs(node);
-
     node.size ??= [DEFAULT_NODE_WIDTH, DEFAULT_NODE_HEIGHT];
     node.size[0] = Math.max(node.size[0] || 0, DEFAULT_NODE_WIDTH);
     node.size[1] = Math.max(node.size[1] || 0, DEFAULT_NODE_HEIGHT);
-  } else {
-    reconcileDynamicInputs(node);
   }
+
+  reconcileDynamicInputs(node);
 
   ensureAutoSwitchWidget(node);
   ensureButtonWidgetsForPins(node);
@@ -795,6 +784,8 @@ function findNodeById(id) {
     if (node) return node;
   }
 
+  // Fallback for older or unusual ComfyUI frontend paths.
+  // app.graph._nodes is a private field and may change in future versions.
   for (const node of app?.graph?._nodes || []) {
     if (String(node.id) === wanted) return node;
   }
@@ -839,7 +830,6 @@ function applyReceiverPayloadToParent(payload) {
   }
 
   removeStandardPreviewWidgetsSoon(parent);
-  requestRedraw(parent);
   return true;
 }
 
@@ -909,6 +899,9 @@ function connectedImageInputsFromLiveNode(nodeId, promptNode) {
     return result.sort((a, b) => a.pin - b.pin);
   }
 
+  // Fallback for unusual serialization/execution paths where the live
+  // LiteGraph node cannot be found. In normal browser execution, the live node
+  // path above is the source of truth.
   return Object.keys(promptNode?.inputs || {})
     .filter((key) => /^image\d+$/.test(key))
     .filter((key) => Array.isArray(promptNode.inputs[key]))
@@ -921,20 +914,6 @@ function connectedImageInputsFromLiveNode(nodeId, promptNode) {
     .sort((a, b) => a.pin - b.pin);
 }
 
-function removeAllImageDependencies(promptNode) {
-  // Intentional no-op.
-  //
-  // Earlier builds removed imageN dependencies from the parent prompt node so
-  // the parent would not wait for all inputs. That made internal receivers the
-  // only update path, but it broke node-level execution paths where injected
-  // receivers are not executed/reported.
-  //
-  // Keeping imageN provides a fallback:
-  // - internal receivers still update the preview immediately
-  // - parent MultiPreview still executes normally at the end
-  // - node execute button can display through the direct parent path
-  void promptNode;
-}
 
 function promptAlreadyHasInternalReceiver(prompt, parentId, pin) {
   for (const node of Object.values(prompt || {})) {
@@ -991,7 +970,9 @@ function injectInternalReceiversIntoPrompt(prompt) {
       injectedCount += 1;
     }
 
-    removeAllImageDependencies(node);
+    // Keep imageN dependencies on the parent prompt node as a fallback.
+    // Internal receivers provide immediate updates, while the parent node can
+    // still execute normally for node-run-button and API-style execution paths.
   }
 
   return injectedCount;
@@ -999,8 +980,9 @@ function injectInternalReceiversIntoPrompt(prompt) {
 
 function patchQueuePromptOnce() {
   // Use multiple hook points because ComfyUI frontend versions and execution
-  // paths differ. injectedPromptObjects prevents duplicate injection for the
-  // same prompt object when more than one hook fires.
+  // paths differ between normal queueing, node execution, and serialized prompt
+  // generation. injectedPromptObjects prevents duplicate injection for the same
+  // prompt object when more than one hook fires.
   if (api && typeof api.queuePrompt === "function" && !api.__mpQueuePromptPatched) {
     const originalApiQueuePrompt = api.queuePrompt.bind(api);
 
