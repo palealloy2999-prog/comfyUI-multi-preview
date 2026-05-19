@@ -87,16 +87,14 @@ MultiPreview uses ComfyUI's standard temporary preview image mechanism through `
 
 This means preview files are handled in the same general way as standard ComfyUI preview nodes.
 
-## v1.2.1
+## v1.2.7-debug
 
-Maintenance release with small cleanup and documentation improvements.
+Maintenance release with a guarded state cache for ComfyUI tab/view switching.
 
-- Cleaned up unused/no-op JavaScript helpers
-- Simplified widget initialization flow
-- Added comments for fallback paths and hook behavior
-- Improved Python-side image input scanning
-- Added logging around image save failures
-- Added documentation for temporary preview files
+- Added in-memory frontend state cache for MultiPreview nodes
+- Restores preview images after ComfyUI tab/view switching
+- Restores selected pin and per-pin batch index
+- Restores preview buttons after node UI rebuilds
 
 
 ## MultiPreview Auto
@@ -110,3 +108,48 @@ Maintenance release with small cleanup and documentation improvements.
 - Uses the same internal receiver mechanism as `MultiPreview`
 
 Use this node when you only want a compact live preview of the latest completed branch.
+
+
+## State Restoration
+
+MultiPreview keeps an in-memory frontend state cache for each node.
+
+When ComfyUI rebuilds the node UI after switching tabs or views, MultiPreview attempts to restore:
+
+- saved preview images
+- selected pin
+- per-pin batch index
+- preview buttons
+
+This state is session-local and is not intended to be a workflow serialization format.
+
+
+### Restoration timing fix
+
+v1.2.3 fixes a case where ComfyUI could call node setup hooks before the final node id/state was available. MultiPreview now delays marking a node as restored until a valid cached state is actually found, and also runs one deferred restore pass after widget setup.
+
+
+### State cache guard
+
+v1.2.4 prevents empty transient UI state during tab/view switches from overwriting a previously cached preview state. It also searches both the current canvas graph and root graph when restoring nodes.
+
+
+## Debug Build
+
+This debug build enables verbose console logging for MultiPreview lifecycle, state save/restore, receiver payloads, and pin selection.
+
+Search the browser console for:
+
+```txt
+[MultiPreview v1.2.7-debug]
+```
+
+
+### Debug log noise reduction
+
+v1.2.7-debug disables the 1-second periodic persistence log by default. State is still saved on receiver updates, pin selection, lifecycle events, blur, visibilitychange, and beforeunload.
+
+
+### Restore retry fix
+
+v1.2.7-debug allows state restoration to run again when a tab/view switch clears the live pin image state while cached preview images still exist.

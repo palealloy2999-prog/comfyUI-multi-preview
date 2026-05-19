@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const VERSION = "v1.2.1";
+const VERSION = "v1.2.7-debug";
 const NODE_NAME = "MultiPreview";
 const AUTO_NODE_NAME = "MultiPreviewAuto";
 const INTERNAL_RECEIVER_NODE_NAME = "MultiPreviewInternalReceiver";
@@ -14,6 +14,27 @@ const DEFAULT_NODE_HEIGHT = 390;
 const MAX_UNWRAP_DEPTH = 10;
 const STANDARD_PREVIEW_CLEANUP_DELAY_MS = 50;
 const MAX_IMAGE_CACHE_ENTRIES = 128;
+const STATE_PERSIST_INTERVAL_MS = 1000;
+const ENABLE_PERIODIC_STATE_PERSIST = false;
+const GLOBAL_STATE_STORE_KEY = "__multiPreviewStateStore_v1";
+
+// Debug build: set to false if the logs become too noisy.
+const DEBUG = true;
+
+function mpNodeLabel(node) {
+  if (!node) return "node:null";
+  return `${node.type || node.comfyClass || "unknown"}#${node.id ?? "?"}`;
+}
+
+function mpLog(label, ...args) {
+  if (!DEBUG) return;
+  console.log(`[MultiPreview ${VERSION}] ${label}`, ...args);
+}
+
+function mpWarn(label, ...args) {
+  if (!DEBUG) return;
+  console.warn(`[MultiPreview ${VERSION}] ${label}`, ...args);
+}
 
 console.log(`[MultiPreview] ${VERSION} loaded`);
 
@@ -38,6 +59,292 @@ function isManagedPreviewNodeName(name) {
 
 function isAutoPreviewNode(node) {
   return node?.type === AUTO_NODE_NAME || node?.comfyClass === AUTO_NODE_NAME;
+}
+
+function clonePlainObject(value) {
+  if (value == null) return value;
+
+  try {
+    return structuredClone(value);
+  } catch {
+    try {
+      return JSON.parse(JSON.stringify(value));
+    } catch {
+      return value;
+    }
+  }
+}
+
+function globalStateStore() {
+  globalThis[GLOBAL_STATE_STORE_KEY] ??= new Map();
+  return globalThis[GLOBAL_STATE_STORE_KEY];
+}
+
+function previewStateKey(node) {
+  if (!node || node.id == null) return null;
+
+  const type = node.type || node.comfyClass || "MultiPreview";
+  return `${type}:${node.id}`;
+}
+
+function candidateGraphs() {
+  const graphs = [
+    app?.canvas?.graph,
+    app?.graph,
+    app?.rootGraph,
+  ].filter(Boolean);
+
+  return [...new Set(graphs)];
+}
+
+function nodeListFromGraph(graph) {
+  if (!graph) return [];
+
+  if (Array.isArray(graph._nodes)) return graph._nodes;
+  if (graph._nodes_by_id && typeof graph._nodes_by_id === "object") {
+    return Object.values(graph._nodes_by_id);
+  }
+
+  return [];
+}
+
+function countStateImages(state) {
+  return countPinImages(state?.pinImages || emptyPinImages());
+}
+
+function saveNodeState(node) {
+  if (!node || !isManagedPreviewNodeName(node.type || node.comfyClass)) return;
+
+  const key = previewStateKey(node);
+  if (!key) {
+    mpLog("saveNodeState: skipped - no key", mpNodeLabel(node));
+    return;
+  }
+
+  saveCurrentPinIndex(node);
+
+  const nextState = {
+    selectedPin: getSelectedPin(node),
+    pinImages: clonePlainObject(node.__mpPinImages || emptyPinImages()),
+    pinImageIndex: clonePlainObject(node.__mpPinImageIndex || {}),
+    connectedPinSnapshot: clonePlainObject(node.__mpConnectedPinSnapshot || []),
+    imageIndex: Number.isInteger(node.imageIndex) ? node.imageIndex : 0,
+    timestamp: Date.now(),
+  };
+
+  const store = globalStateStore();
+  const prevState = store.get(key);
+  const nextCount = countStateImages(nextState);
+  const prevCount = countStateImages(prevState);
+
+  // Tab/view switches can briefly rebuild nodes with empty transient UI state.
+  // Do not let that empty state overwrite a useful cached preview.
+  if (nextCount === 0 && prevCount > 0) {
+    mpLog("saveNodeState: skipped empty overwrite", {
+      key,
+      node: mpNodeLabel(node),
+      selectedPin: nextState.selectedPin,
+      nextCount,
+      prevCount,
+      prevState,
+    });
+    return;
+  }
+
+  // Empty state without an existing image cache is not useful for preview
+  // restoration. Avoid repeatedly storing/logging it during idle polling.
+  if (nextCount === 0 && prevCount === 0) {
+    mpLog("saveNodeState: skipped empty no-cache state", {
+      key,
+      node: mpNodeLabel(node),
+      selectedPin: nextState.selectedPin,
+      nextCount,
+      prevCount,
+    });
+    return;
+  }
+
+  store.set(key, nextState);
+  mpLog("saveNodeState: stored", {
+    key,
+    node: mpNodeLabel(node),
+    selectedPin: nextState.selectedPin,
+    imageIndex: nextState.imageIndex,
+    pinKeys: Object.keys(nextState.pinImages || {}),
+    imageCount: nextCount,
+  });
+}
+
+function restoreNodeState(node) {
+  if (!node) return false;
+
+  const key = previewStateKey(node);
+  if (!key) {
+    // onNodeCreated can run before the final node id is available.
+    // Do not mark this node as restored yet; onConfigure / later ensureWidgets
+    // may be able to restore it once the id is stable.
+    mpLog("restoreNodeState: skipped - no key yet", mpNodeLabel(node));
+    return false;
+  }
+
+  const state = globalStateStore().get(key);
+  if (!state) {
+    mpLog("restoreNodeState: skipped - no cached state", {
+      key,
+      node: mpNodeLabel(node),
+      storeKeys: [...globalStateStore().keys()],
+    });
+    return false;
+  }
+
+  const liveCount = countPinImages(node.__mpPinImages || emptyPinImages());
+  const cachedCount = countStateImages(state);
+
+  // If live state still has images, keep it.
+  if (liveCount > 0) {
+    node.__mpStateRestored = true;
+    mpLog("restoreNodeState: skipped - live state already exists", {
+      key,
+      node: mpNodeLabel(node),
+      liveCount,
+      cachedCount,
+    });
+    return false;
+  }
+
+  // Retry case:
+  // A tab/view switch can keep the same node object and __mpStateRestored=true
+  // while clearing its live pin image state. If cached images still exist,
+  // restore again instead of returning early.
+  if (node.__mpStateRestored && cachedCount === 0) {
+    mpLog("restoreNodeState: skipped - already restored and cache empty", {
+      key,
+      node: mpNodeLabel(node),
+      liveCount,
+      cachedCount,
+    });
+    return false;
+  }
+
+  if (cachedCount === 0) {
+    mpLog("restoreNodeState: skipped - cached state has no images", {
+      key,
+      node: mpNodeLabel(node),
+      liveCount,
+      cachedCount,
+      state,
+    });
+    return false;
+  }
+
+  node.properties ??= {};
+  node.properties.selected_pin = String(state.selectedPin || node.properties.selected_pin || "1");
+  node.__mpPinImages = clonePlainObject(state.pinImages || emptyPinImages());
+  node.__mpPinImageIndex = clonePlainObject(state.pinImageIndex || {});
+  node.__mpConnectedPinSnapshot = clonePlainObject(state.connectedPinSnapshot || []);
+  node.imageIndex = Number.isInteger(state.imageIndex) ? state.imageIndex : 0;
+  node.__mpStateRestored = true;
+
+  const restoredCount = countPinImages(node.__mpPinImages);
+  mpLog("restoreNodeState: restored", {
+    key,
+    node: mpNodeLabel(node),
+    selectedPin: node.properties.selected_pin,
+    imageIndex: node.imageIndex,
+    pinKeys: Object.keys(node.__mpPinImages || {}),
+    liveCount,
+    cachedCount,
+    restoredCount,
+    state,
+  });
+
+  return restoredCount > 0;
+}
+
+function restoreDisplayedPinIfNeeded(node) {
+  if (!node) return;
+
+  if ((node.__mpEntries || []).length > 0) {
+    mpLog("restoreDisplayedPinIfNeeded: skipped - entries already exist", {
+      node: mpNodeLabel(node),
+      entries: node.__mpEntries.length,
+    });
+    return;
+  }
+
+  const selectedPin = getSelectedPin(node);
+  mpLog("restoreDisplayedPinIfNeeded: start", {
+    node: mpNodeLabel(node),
+    selectedPin,
+    receivedPins: receivedPinKeys(node),
+    pinImageCount: countPinImages(node.__mpPinImages || emptyPinImages()),
+  });
+
+  if (hasImagesForPin(node, selectedPin)) {
+    mpLog("restoreDisplayedPinIfNeeded: select selected pin", { node: mpNodeLabel(node), selectedPin });
+    selectPin(node, selectedPin, { deferUntilLoaded: false });
+    return;
+  }
+
+  const fallbackPin = receivedPinKeys(node)[0];
+  if (fallbackPin && hasImagesForPin(node, fallbackPin)) {
+    mpLog("restoreDisplayedPinIfNeeded: select fallback pin", { node: mpNodeLabel(node), fallbackPin });
+    selectPin(node, fallbackPin, { deferUntilLoaded: false });
+  } else {
+    mpLog("restoreDisplayedPinIfNeeded: no displayable pin", { node: mpNodeLabel(node), fallbackPin });
+  }
+}
+
+function managedPreviewNodes() {
+  const nodes = [];
+
+  for (const graph of candidateGraphs()) {
+    for (const node of nodeListFromGraph(graph)) {
+      if (isManagedPreviewNodeName(node?.type || node?.comfyClass)) {
+        nodes.push(node);
+      }
+    }
+  }
+
+  return [...new Set(nodes)];
+}
+
+function persistAllPreviewStates() {
+  const nodes = managedPreviewNodes();
+  mpLog("persistAllPreviewStates: start", {
+    count: nodes.length,
+    nodes: nodes.map(mpNodeLabel),
+  });
+
+  for (const node of nodes) {
+    saveNodeState(node);
+  }
+}
+
+function registerStatePersistence() {
+  if (globalThis.__mpStatePersistenceRegistered) {
+    mpLog("registerStatePersistence: already registered");
+    return;
+  }
+  globalThis.__mpStatePersistenceRegistered = true;
+
+  mpLog("registerStatePersistence: registered", {
+    interval: STATE_PERSIST_INTERVAL_MS,
+    periodic: ENABLE_PERIODIC_STATE_PERSIST,
+  });
+
+  if (ENABLE_PERIODIC_STATE_PERSIST) {
+    setInterval(persistAllPreviewStates, STATE_PERSIST_INTERVAL_MS);
+  }
+
+  if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+    window.addEventListener("blur", persistAllPreviewStates);
+    window.addEventListener("beforeunload", persistAllPreviewStates);
+  }
+
+  if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+    document.addEventListener("visibilitychange", persistAllPreviewStates);
+  }
 }
 
 function isOurWidget(widget) {
@@ -634,9 +941,21 @@ function updateButtonLabels(node) {
 function selectPin(node, pinKey, options = {}) {
   pinKey = String(pinKey);
 
+  mpLog("selectPin: start", {
+    node: mpNodeLabel(node),
+    pinKey,
+    options,
+    selectedPin: getSelectedPin(node),
+    currentImageIndex: node?.imageIndex,
+    hasImages: hasImagesForPin(node, pinKey),
+    pinImageCount: normalizeImages(node?.__mpPinImages?.[pinKey]).length,
+  });
+
   if (!hasImagesForPin(node, pinKey)) {
+    mpLog("selectPin: no images for pin", { node: mpNodeLabel(node), pinKey });
     updateButtonLabels(node);
     requestRedraw(node);
+    saveNodeState(node);
     return;
   }
 
@@ -648,6 +967,15 @@ function selectPin(node, pinKey, options = {}) {
   const entries = images.map((data, index) => makeImageEntry(node, data, index));
   const targetIndex = getTargetImageIndex(node, pinKey, entries, options);
   const targetEntry = entries[targetIndex];
+
+  mpLog("selectPin: entries prepared", {
+    node: mpNodeLabel(node),
+    pinKey,
+    entries: entries.length,
+    targetIndex,
+    targetLoaded: targetEntry?.loaded,
+    targetError: targetEntry?.error,
+  });
 
   if (
     options?.deferUntilLoaded === true &&
@@ -668,6 +996,12 @@ function selectPin(node, pinKey, options = {}) {
       });
     });
 
+    mpLog("selectPin: deferred until target image loaded", {
+      node: mpNodeLabel(node),
+      pinKey,
+      targetIndex,
+      url: targetEntry?.url,
+    });
     updateButtonLabels(node);
     requestRedraw(node);
     return;
@@ -684,6 +1018,14 @@ function selectPin(node, pinKey, options = {}) {
   removeStandardPreviewWidgetsSoon(node);
   updateButtonLabels(node);
   requestRedraw(node);
+  mpLog("selectPin: done", {
+    node: mpNodeLabel(node),
+    pinKey,
+    imageIndex: node.imageIndex,
+    imgs: node.imgs?.length,
+    images: node.images?.length,
+  });
+  saveNodeState(node);
 }
 
 function ensureAutoSwitchWidget(node) {
@@ -748,16 +1090,29 @@ function ensureButtonWidgetsForPins(node) {
 }
 
 function ensureWidgets(node) {
+  mpLog("ensureWidgets: start", {
+    node: mpNodeLabel(node),
+    selectedPin: node?.properties?.selected_pin,
+    pinImageCount: countPinImages(node?.__mpPinImages || emptyPinImages()),
+    entries: node?.__mpEntries?.length,
+    widgetsReady: node?.__mpWidgetsReady,
+  });
+
   node.properties ??= {};
   node.properties.selected_pin ??= "1";
   node.properties.auto_switch_latest ??= false;
+
+  restoreNodeState(node);
+
   node.__mpPinImages ??= emptyPinImages();
   node.__mpEntries ??= [];
   node.__mpImageCache ??= new Map();
   node.__mpPinImageIndex ??= {};
   node.__mpConnectedPinSnapshot ??= [];
 
-  syncContextMenuImages(node, node.__mpEntries);
+  if ((node.__mpEntries || []).length > 0) {
+    syncContextMenuImages(node, node.__mpEntries);
+  }
 
   if (!node.__mpWidgetsReady) {
     node.__mpWidgetsReady = true;
@@ -771,30 +1126,88 @@ function ensureWidgets(node) {
 
   ensureAutoSwitchWidget(node);
   ensureButtonWidgetsForPins(node);
+  restoreDisplayedPinIfNeeded(node);
   removeStandardPreviewWidgetsSoon(node);
   updateButtonLabels(node);
   requestRedraw(node);
+  saveNodeState(node);
+
+  mpLog("ensureWidgets: end", {
+    node: mpNodeLabel(node),
+    selectedPin: getSelectedPin(node),
+    pinImageCount: countPinImages(node.__mpPinImages || emptyPinImages()),
+    entries: node.__mpEntries?.length,
+    widgets: node.widgets?.length,
+    imgs: node.imgs?.length,
+    images: node.images?.length,
+  });
+
+  // LiteGraph can call onNodeCreated/onConfigure before all graph/tab state is
+  // fully settled. Run one deferred restore pass so tab/view switching can
+  // recover previews after the node has its final id and widgets.
+  if (!node.__mpDeferredRestoreScheduled) {
+    node.__mpDeferredRestoreScheduled = true;
+    setTimeout(() => {
+      node.__mpDeferredRestoreScheduled = false;
+      mpLog("ensureWidgets: deferred restore pass", { node: mpNodeLabel(node) });
+      const restored = restoreNodeState(node);
+      if (restored || countPinImages(node.__mpPinImages || emptyPinImages()) > 0) {
+        ensureButtonWidgetsForPins(node);
+        restoreDisplayedPinIfNeeded(node);
+        updateButtonLabels(node);
+        requestRedraw(node);
+        saveNodeState(node);
+      }
+    }, 0);
+  }
 }
 
 function findNodeById(id) {
   const wanted = String(id);
+  const numericId = Number(id);
+  const graphs = candidateGraphs();
 
-  if (app?.graph?.getNodeById) {
-    const node = app.graph.getNodeById(Number(id));
-    if (node) return node;
+  mpLog("findNodeById: start", {
+    id,
+    graphCount: graphs.length,
+    graphNodeCounts: graphs.map((graph) => nodeListFromGraph(graph).length),
+  });
+
+  for (const graph of graphs) {
+    if (typeof graph?.getNodeById === "function") {
+      const node = graph.getNodeById(numericId);
+      if (node) {
+        mpLog("findNodeById: found by getNodeById", { id, node: mpNodeLabel(node) });
+        return node;
+      }
+    }
+
+    // Fallback for older or unusual ComfyUI frontend paths.
+    // _nodes is a private field and may change in future versions.
+    for (const node of nodeListFromGraph(graph)) {
+      if (String(node.id) === wanted) {
+        mpLog("findNodeById: found by node list", { id, node: mpNodeLabel(node) });
+        return node;
+      }
+    }
   }
 
-  // Fallback for older or unusual ComfyUI frontend paths.
-  // app.graph._nodes is a private field and may change in future versions.
-  for (const node of app?.graph?._nodes || []) {
-    if (String(node.id) === wanted) return node;
-  }
-
+  mpWarn("findNodeById: not found", { id, graphCount: graphs.length });
   return null;
 }
 
 function applyReceiverPayloadToParent(payload) {
-  if (!payload) return false;
+  if (!payload) {
+    mpWarn("applyReceiverPayloadToParent: empty payload");
+    return false;
+  }
+
+  mpLog("applyReceiverPayloadToParent: payload", {
+    parentId: payload.parentId,
+    pinKey: payload.pinKey,
+    images: payload.images?.length,
+    payload,
+  });
 
   const parent = findNodeById(payload.parentId);
   if (!parent) {
@@ -818,6 +1231,15 @@ function applyReceiverPayloadToParent(payload) {
     !hasImagesForPin(parent, selectedPin) ||
     !(parent.__mpEntries || []).length;
 
+  mpLog("applyReceiverPayloadToParent: decision", {
+    parent: mpNodeLabel(parent),
+    selectedPin,
+    payloadPin: payload.pinKey,
+    autoSwitchLatest,
+    entries: parent.__mpEntries?.length,
+    shouldDisplayNow,
+  });
+
   if (shouldDisplayNow) {
     selectPin(parent, payload.pinKey, {
       // Always use per-pin remembered batch index.
@@ -830,12 +1252,17 @@ function applyReceiverPayloadToParent(payload) {
   }
 
   removeStandardPreviewWidgetsSoon(parent);
+  saveNodeState(parent);
   return true;
 }
 
 function handleCustomReceiverEvent(event) {
+  mpLog("customEvent:multi_preview_receiver", event?.detail ?? event);
   const payload = normalizeCustomReceiverEvent(event);
-  if (!payload) return;
+  if (!payload) {
+    mpWarn("customEvent: normalized payload is empty", event);
+    return;
+  }
   applyReceiverPayloadToParent(payload);
 }
 
@@ -1017,8 +1444,10 @@ app.registerExtension({
   name: `mick.MultiPreview.${VERSION}`,
 
   async setup() {
+    mpLog("extension:setup");
     patchQueuePromptOnce();
     registerCustomReceiverEventListener();
+    registerStatePersistence();
   },
 
   async beforeQueuePrompt(workflow, output) {
@@ -1034,18 +1463,21 @@ app.registerExtension({
     const originalOnConnectionsChange = nodeType.prototype.onConnectionsChange;
 
     nodeType.prototype.onNodeCreated = function (...args) {
+      mpLog("lifecycle:onNodeCreated", { node: mpNodeLabel(this), args });
       const result = originalOnNodeCreated?.apply(this, args);
       ensureWidgets(this);
       return result;
     };
 
     nodeType.prototype.onConfigure = function (...args) {
+      mpLog("lifecycle:onConfigure", { node: mpNodeLabel(this), args });
       const result = originalOnConfigure?.apply(this, args);
       ensureWidgets(this);
       return result;
     };
 
     nodeType.prototype.onConnectionsChange = function (...args) {
+      mpLog("lifecycle:onConnectionsChange", { node: mpNodeLabel(this), args });
       const result = originalOnConnectionsChange?.apply(this, args);
 
       setTimeout(() => {
@@ -1059,12 +1491,19 @@ app.registerExtension({
 
         updateButtonLabels(this);
         requestRedraw(this);
+        saveNodeState(this);
       }, 0);
 
       return result;
     };
 
     nodeType.prototype.onExecuted = function (output, ...args) {
+      mpLog("lifecycle:onExecuted", {
+        node: mpNodeLabel(this),
+        outputKeys: Object.keys(output || {}),
+        output,
+        args,
+      });
       // Intentionally do not call original PreviewImage.onExecuted.
       // MultiPreview manages node.images/node.imgs directly and removes the
       // standard preview widget to avoid duplicate previews.
@@ -1094,6 +1533,7 @@ app.registerExtension({
       removeStandardPreviewWidgetsSoon(this);
       updateButtonLabels(this);
       requestRedraw(this);
+      saveNodeState(this);
     };
   },
 });
