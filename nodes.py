@@ -4,7 +4,7 @@ from server import PromptServer
 from nodes import PreviewImage
 
 
-VERSION = "v1.2.17"
+VERSION = "v1.2.21"
 
 # Keep this value in sync with MAX_PINS in web/multiPreview.js.
 MAX_PINS = 32
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class MultiPreview(PreviewImage):
-    """MultiPreview v1.2.17.
+    """MultiPreview v1.2.21.
 
     Parent node with dynamic image pins. During queueing, imageN dependencies
     are replaced by injected MultiPreviewInternalReceiver nodes on the frontend.
@@ -113,6 +113,7 @@ class MultiPreviewInternalReceiver(PreviewImage):
                 "image": ("IMAGE",),
                 "parent_id": ("INT", {"default": 0, "min": 0, "max": 999999999, "step": 1}),
                 "pin": ("INT", {"default": 1, "min": 1, "max": MAX_PINS, "step": 1}),
+                "state_key": ("STRING", {"default": ""}),
             },
             "hidden": {
                 "prompt": "PROMPT",
@@ -126,10 +127,11 @@ class MultiPreviewInternalReceiver(PreviewImage):
     CATEGORY = "image"
     DESCRIPTION = "Internal receiver injected by MultiPreview JS."
 
-    def receive(self, image, parent_id=0, pin=1, prompt=None, extra_pnginfo=None):
+    def receive(self, image, parent_id=0, pin=1, state_key="", prompt=None, extra_pnginfo=None):
         try:
             parent_id = int(parent_id)
             pin = int(pin)
+            state_key = str(state_key or "")
         except (TypeError, ValueError):
             logger.exception("MultiPreviewInternalReceiver received invalid parent_id or pin")
             raise
@@ -154,6 +156,7 @@ class MultiPreviewInternalReceiver(PreviewImage):
         payload = {
             "parent_id": parent_id,
             "pin": pin,
+            "state_key": state_key,
             "images": images,
         }
 

@@ -248,3 +248,44 @@ v1.2.8 では、タブ / view 切り替えで live 側の pin 画像状態が空
 - 標準 preview widget 削除の 500ms 遅延 sweep を削除
 - receiver 更新時、ウィジェット初期化済みの場合は軽量な状態初期化のみ行うように変更
 - v1.2.16 の画像入力なしエラーメッセージ挙動は維持
+
+
+## v1.2.18
+
+小規模な安定性改善です。
+
+- `onConnectionsChange` に schedule guard を追加し、動的 pin 調整処理が重複して queue されにくいように修正
+- image cache から削除される画像について、handler 削除・`img.src` クリア・waiter callback クリアを明示的に実行
+- v1.2.17 のちらつき低減対応は維持
+
+
+## v1.2.19
+
+receiver の state 管理経路を一本化しました。
+
+- internal receiver に安定した `state_key` を追加
+- workflow タブが表でも裏でも、receiver payload はまず global preview state store を更新
+- live node が存在する場合のみ、同じ保存済み state を UI に反映
+- preview 保持、selected pin、pin ごとの batch index 復元を state_key ベースの単一路線に統一
+
+
+## v1.2.20
+
+state_key fallback と cache eviction の安全性修正です。
+
+- cache eviction 時に `img.src` や waiter callback を消さず、Map 参照のみ削除するように変更
+- 表示中プレビューや deferred selection が cache eviction で壊れる問題を回避
+- prompt node id / class_type から作る fallback state key を追加
+- live graph node が見つからない prompt injection 経路でも receiver payload を保存可能に変更
+- 復元時は graph-based state key と prompt fallback state key の両方を確認
+- v1.2.19 の receiver state 一本化は維持
+
+
+## v1.2.21
+
+レビュー指摘対応です。
+
+- `injectInternalReceiversIntoPrompt()` 内の未定義 fallback 定数を修正
+- `removeStandardPreviewWidgetsSoon()` に schedule guard を追加し、重複 timer を抑制
+- `onExecuted` hook で意図的に未使用にしている変数へ補足コメントを追加
+- v1.2.20 の state-key fallback と安全な cache eviction 挙動は維持

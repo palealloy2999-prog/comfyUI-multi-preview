@@ -245,3 +245,42 @@ Light flicker reduction pass.
 - Removes the 500ms delayed standard-preview-widget cleanup sweep
 - Uses a lightweight state initialization path for receiver updates after the node widgets are already ready
 - Keeps the v1.2.16 no-input error message behavior
+
+
+## v1.2.18
+
+Small stability cleanup.
+
+- Adds a schedule guard to `onConnectionsChange` so dynamic pin reconciliation cannot queue repeated overlapping passes
+- Clears evicted image cache entries more explicitly by dropping handlers, clearing `img.src`, and emptying waiter callbacks
+- Keeps the v1.2.17 flicker reduction changes
+
+
+## v1.2.19
+
+Unified receiver state pipeline.
+
+- Internal receivers now include a stable `state_key`
+- Receiver payloads always update the global preview state store first, whether the workflow tab is visible or not
+- If the live node is available, the same stored state is then applied to the node UI
+- Preview persistence, selected pin state, and per-pin batch index restoration now use a single state-key-based path
+
+
+## v1.2.20
+
+State-key fallback and cache eviction safety fix.
+
+- Cache eviction now removes only the Map reference and no longer clears `img.src` or waiter callbacks, preventing visible previews or deferred selections from being broken
+- Adds a prompt-node fallback state key so receiver payloads can still be stored when the live graph node is unavailable during prompt injection
+- Restore now checks both the graph-based state key and the prompt fallback state key
+- Keeps the v1.2.19 unified receiver state pipeline
+
+
+## v1.2.21
+
+Review fixes.
+
+- Fixes an undefined fallback constant in `injectInternalReceiversIntoPrompt()`
+- Adds a schedule guard to `removeStandardPreviewWidgetsSoon()` to coalesce repeated cleanup timers
+- Adds a clarifying comment for intentionally unused `onExecuted` hook variables
+- Keeps the v1.2.20 state-key fallback and safe cache eviction behavior
