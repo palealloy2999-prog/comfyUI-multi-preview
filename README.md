@@ -284,3 +284,14 @@ Review fixes.
 - Adds a schedule guard to `removeStandardPreviewWidgetsSoon()` to coalesce repeated cleanup timers
 - Adds a clarifying comment for intentionally unused `onExecuted` hook variables
 - Keeps the v1.2.20 state-key fallback and safe cache eviction behavior
+
+
+## v1.2.22
+
+Node removal cleanup.
+
+- Adds an `onRemoved` lifecycle hook for MultiPreview nodes
+- Clears graph-based and prompt-fallback preview state keys from `globalStateStore()` when the node is removed
+- Keeps the v1.2.21 review fixes and v1.2.20 state-key fallback behavior
+
+Note: if a future ComfyUI frontend fires `onRemoved` during workflow-tab unload rather than actual node deletion, this cleanup may need a stricter deletion guard.

@@ -289,3 +289,14 @@ state_key fallback と cache eviction の安全性修正です。
 - `removeStandardPreviewWidgetsSoon()` に schedule guard を追加し、重複 timer を抑制
 - `onExecuted` hook で意図的に未使用にしている変数へ補足コメントを追加
 - v1.2.20 の state-key fallback と安全な cache eviction 挙動は維持
+
+
+## v1.2.22
+
+ノード削除時の cleanup 対応です。
+
+- MultiPreview ノードに `onRemoved` lifecycle hook を追加
+- ノード削除時に、graph-based / prompt-fallback の preview state key を `globalStateStore()` から削除
+- v1.2.21 のレビュー指摘対応と v1.2.20 の state-key fallback 挙動は維持
+
+注意: 将来の ComfyUI frontend で、実際のノード削除ではなく workflow tab unload 時にも `onRemoved` が走る場合は、より厳密な削除判定 guard が必要になる可能性があります。

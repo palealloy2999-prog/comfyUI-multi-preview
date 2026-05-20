@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const VERSION = "v1.2.21";
+const VERSION = "v1.2.22";
 const NODE_NAME = "MultiPreview";
 const AUTO_NODE_NAME = "MultiPreviewAuto";
 const INTERNAL_RECEIVER_NODE_NAME = "MultiPreviewInternalReceiver";
@@ -1847,6 +1847,7 @@ app.registerExtension({
     const originalOnConfigure = nodeType.prototype.onConfigure;
     const originalOnExecuted = nodeType.prototype.onExecuted;
     const originalOnConnectionsChange = nodeType.prototype.onConnectionsChange;
+    const originalOnRemoved = nodeType.prototype.onRemoved;
 
     nodeType.prototype.onNodeCreated = function (...args) {
       mpLog("lifecycle:onNodeCreated", { node: mpNodeLabel(this), args });
@@ -1888,6 +1889,19 @@ app.registerExtension({
       }, 0);
 
       return result;
+    };
+
+    nodeType.prototype.onRemoved = function (...args) {
+      mpLog("lifecycle:onRemoved", { node: mpNodeLabel(this) });
+
+      const store = globalStateStore();
+      for (const key of previewStateKeysForNode(this)) {
+        if (store.delete(key)) {
+          mpLog("onRemoved: cleared globalStateStore key", { key, node: mpNodeLabel(this) });
+        }
+      }
+
+      return originalOnRemoved?.apply(this, args);
     };
 
     nodeType.prototype.onExecuted = function (output, ...args) {
