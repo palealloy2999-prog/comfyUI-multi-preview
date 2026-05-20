@@ -295,3 +295,13 @@ Node removal cleanup.
 - Keeps the v1.2.21 review fixes and v1.2.20 state-key fallback behavior
 
 Note: if a future ComfyUI frontend fires `onRemoved` during workflow-tab unload rather than actual node deletion, this cleanup may need a stricter deletion guard.
+
+
+## v1.2.23
+
+0x0 flicker reduction for auto-update replacement.
+
+- `syncContextMenuImages()` now keeps the previous `node.imgs` until the whole replacement batch has loaded
+- Prevents ComfyUI's standard preview widget from briefly rendering newly assigned but still-unloaded images as 0x0
+- Restore and fallback execution paths now use deferred pin selection
+- Keeps the v1.2.22 onRemoved cleanup behavior

@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const VERSION = "v1.2.22";
+const VERSION = "v1.2.23";
 const NODE_NAME = "MultiPreview";
 const AUTO_NODE_NAME = "MultiPreviewAuto";
 const INTERNAL_RECEIVER_NODE_NAME = "MultiPreviewInternalReceiver";
@@ -408,14 +408,14 @@ function restoreDisplayedPinIfNeeded(node) {
 
   if (hasImagesForPin(node, selectedPin)) {
     mpLog("restoreDisplayedPinIfNeeded: select selected pin", { node: mpNodeLabel(node), selectedPin });
-    selectPin(node, selectedPin, { deferUntilLoaded: false });
+    selectPin(node, selectedPin, { deferUntilLoaded: true });
     return;
   }
 
   const fallbackPin = receivedPinKeys(node)[0];
   if (fallbackPin && hasImagesForPin(node, fallbackPin)) {
     mpLog("restoreDisplayedPinIfNeeded: select fallback pin", { node: mpNodeLabel(node), fallbackPin });
-    selectPin(node, fallbackPin, { deferUntilLoaded: false });
+    selectPin(node, fallbackPin, { deferUntilLoaded: true });
   } else {
     mpLog("restoreDisplayedPinIfNeeded: no displayable pin", { node: mpNodeLabel(node), fallbackPin });
   }
@@ -1173,19 +1173,50 @@ function syncContextMenuImages(node, entries, options = {}) {
   const prevIndex = Number.isInteger(node.imageIndex) ? node.imageIndex : 0;
   const maxIndex = Math.max(0, entries.length - 1);
 
-  node.images = entries.map((entry) => entry.data);
-  node.imgs = entries.map((entry) => entry.img);
-
   // Preserve the current batch page when other pins update or when the same
   // pin receives a new result. Reset only for explicit user pin switching.
   // targetIndex is used for auto-follow-latest mode.
-  if (hasTargetIndex) {
-    node.imageIndex = Math.min(Math.max(0, options.targetIndex), maxIndex);
-  } else {
-    node.imageIndex = resetIndex ? 0 : Math.min(Math.max(0, prevIndex), maxIndex);
+  const nextIndex = hasTargetIndex
+    ? Math.min(Math.max(0, options.targetIndex), maxIndex)
+    : resetIndex
+      ? 0
+      : Math.min(Math.max(0, prevIndex), maxIndex);
+
+  const pendingEntries = entries.filter((entry) => entry && !entry.loaded && !entry.error);
+
+  if (pendingEntries.length > 0) {
+    const token = {};
+    node.__mpPendingImageSyncToken = token;
+
+    const retry = () => {
+      if (node.__mpPendingImageSyncToken !== token) return;
+      if (entries.some((entry) => entry && !entry.loaded && !entry.error)) return;
+
+      syncContextMenuImages(node, entries, {
+        ...options,
+        targetIndex: nextIndex,
+      });
+      updateButtonLabels(node);
+      requestRedraw(node);
+      saveNodeState(node);
+    };
+
+    for (const entry of pendingEntries) {
+      whenEntryReady(entry, retry);
+    }
+
+    // Keep the previous node.imgs until the whole batch is ready. ComfyUI's
+    // standard preview widget can briefly render unloaded images as 0x0.
+    return false;
   }
 
+  node.__mpPendingImageSyncToken = null;
+  node.images = entries.map((entry) => entry.data);
+  node.imgs = entries.map((entry) => entry.img);
+  node.imageIndex = nextIndex;
   node.overIndex = null;
+
+  return true;
 }
 
 function updateButtonLabels(node) {
@@ -1277,9 +1308,23 @@ function selectPin(node, pinKey, options = {}) {
   setSelectedPin(node, pinKey);
   node.__mpEntries = entries;
 
-  syncContextMenuImages(node, node.__mpEntries, {
+  const synced = syncContextMenuImages(node, node.__mpEntries, {
     targetIndex,
   });
+
+  if (!synced) {
+    mpLog("selectPin: sync deferred until batch images are loaded", {
+      node: mpNodeLabel(node),
+      pinKey,
+      targetIndex,
+      entries: node.__mpEntries.length,
+    });
+    updateButtonLabels(node);
+    requestRedraw(node);
+    saveNodeState(node);
+    return;
+  }
+
   setStoredPinIndex(node, pinKey, node.imageIndex);
 
   removeStandardPreviewWidgetsSoon(node);
@@ -1935,7 +1980,7 @@ app.registerExtension({
           selectedPin = firstAvailablePin(this);
         }
 
-        selectPin(this, selectedPin);
+        selectPin(this, selectedPin, { deferUntilLoaded: true });
       }
 
       reconcileDynamicInputs(this);

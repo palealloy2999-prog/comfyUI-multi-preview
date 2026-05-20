@@ -300,3 +300,13 @@ state_key fallback と cache eviction の安全性修正です。
 - v1.2.21 のレビュー指摘対応と v1.2.20 の state-key fallback 挙動は維持
 
 注意: 将来の ComfyUI frontend で、実際のノード削除ではなく workflow tab unload 時にも `onRemoved` が走る場合は、より厳密な削除判定 guard が必要になる可能性があります。
+
+
+## v1.2.23
+
+自動更新時の 0x0 ちらつき低減です。
+
+- `syncContextMenuImages()` で、差し替え先 batch 全体の読み込みが終わるまで直前の `node.imgs` を維持
+- 新しい未ロード画像を標準 preview widget が一瞬 0x0 として描画する問題を抑制
+- 復元経路と fallback 実行経路も deferred pin selection を使うように変更
+- v1.2.22 の onRemoved cleanup 挙動は維持
