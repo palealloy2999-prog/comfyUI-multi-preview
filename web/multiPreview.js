@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const VERSION = "v1.2.16";
+const VERSION = "v1.2.17";
 const NODE_NAME = "MultiPreview";
 const AUTO_NODE_NAME = "MultiPreviewAuto";
 const INTERNAL_RECEIVER_NODE_NAME = "MultiPreviewInternalReceiver";
@@ -487,7 +487,6 @@ function removeStandardPreviewWidgetsSoon(node) {
   setTimeout(() => removeStandardPreviewWidgets(node), 0);
   setTimeout(() => removeStandardPreviewWidgets(node), STANDARD_PREVIEW_CLEANUP_DELAY_MS);
   setTimeout(() => removeStandardPreviewWidgets(node), 150);
-  setTimeout(() => removeStandardPreviewWidgets(node), 500);
 }
 
 function imageDataToUrl(data) {
@@ -1192,7 +1191,6 @@ function selectPin(node, pinKey, options = {}) {
 
   if (
     options?.deferUntilLoaded === true &&
-    (node.imgs || []).length > 0 &&
     targetEntry &&
     !targetEntry.loaded &&
     !targetEntry.error
@@ -1377,6 +1375,22 @@ function ensureWidgets(node) {
   }
 }
 
+function ensureCoreState(node) {
+  if (!node) return;
+
+  node.properties ??= {};
+  node.properties.selected_pin ??= "1";
+  node.properties.auto_switch_latest ??= false;
+
+  installImageIndexTracker(node);
+
+  node.__mpPinImages ??= emptyPinImages();
+  node.__mpEntries ??= [];
+  node.__mpImageCache ??= new Map();
+  node.__mpPinImageIndex ??= {};
+  node.__mpConnectedPinSnapshot ??= [];
+}
+
 function findNodeById(id) {
   const wanted = String(id);
   const numericId = Number(id);
@@ -1430,7 +1444,11 @@ function applyReceiverPayloadToParent(payload) {
     return false;
   }
 
-  ensureWidgets(parent);
+  if (!parent.__mpWidgetsReady) {
+    ensureWidgets(parent);
+  } else {
+    ensureCoreState(parent);
+  }
 
   parent.__mpPinImages ??= emptyPinImages();
   parent.__mpPinImages[payload.pinKey] = payload.images;

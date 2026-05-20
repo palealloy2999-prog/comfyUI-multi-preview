@@ -235,3 +235,13 @@ Error message adjustment.
 
 - Changes the no-input execution error message to `Required input is missing: images`
 - Keeps the v1.2.15 behavior where a previously displayed preview remains visible while the node turns red
+
+
+## v1.2.17
+
+Light flicker reduction pass.
+
+- Defers pin switching whenever the target image is not loaded yet, even when there is no current `node.imgs` preview
+- Removes the 500ms delayed standard-preview-widget cleanup sweep
+- Uses a lightweight state initialization path for receiver updates after the node widgets are already ready
+- Keeps the v1.2.16 no-input error message behavior
