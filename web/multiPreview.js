@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const VERSION = "v1.2.23";
+const VERSION = "v1.2.25";
 const NODE_NAME = "MultiPreview";
 const AUTO_NODE_NAME = "MultiPreviewAuto";
 const INTERNAL_RECEIVER_NODE_NAME = "MultiPreviewInternalReceiver";
@@ -200,7 +200,7 @@ function saveNodeState(node) {
     pinImages: clonePlainObject(node.__mpPinImages || emptyPinImages()),
     pinImageIndex: clonePlainObject(node.__mpPinImageIndex || {}),
     connectedPinSnapshot: clonePlainObject(currentConnectedPinSnapshot(node)),
-    imageIndex: Number.isInteger(node.imageIndex) ? node.imageIndex : 0,
+    imageIndex: node.imageIndex === null ? null : Number.isInteger(node.imageIndex) ? node.imageIndex : 0,
     timestamp: Date.now(),
     cleared: false,
   };
@@ -368,7 +368,7 @@ function restoreNodeState(node) {
   node.__mpPinImages = clonePlainObject(state.pinImages || emptyPinImages());
   node.__mpPinImageIndex = clonePlainObject(state.pinImageIndex || {});
   node.__mpConnectedPinSnapshot = clonePlainObject(state.connectedPinSnapshot || []);
-  node.imageIndex = Number.isInteger(state.imageIndex) ? state.imageIndex : 0;
+  node.imageIndex = state.imageIndex === null ? null : Number.isInteger(state.imageIndex) ? state.imageIndex : 0;
   node.__mpStateRestored = true;
 
   const restoredCount = countPinImages(node.__mpPinImages);
@@ -813,15 +813,47 @@ function whenEntryReady(entry, callback) {
   return false;
 }
 
+function hasOwnOption(object, key) {
+  return Object.prototype.hasOwnProperty.call(object || {}, key);
+}
+
+function normalizeDisplayImageIndex(value, maxIndex) {
+  // ComfyUI uses explicit null for batch grid view.
+  // Undefined means no stored value yet, so default to page 0.
+  if (value === null) return null;
+  if (value === undefined) return 0;
+  if (Number.isInteger(value)) return Math.min(Math.max(0, value), Math.max(0, maxIndex));
+  return 0;
+}
+
+function normalizeNumericImageIndex(value, maxIndex) {
+  const normalized = normalizeDisplayImageIndex(value, maxIndex);
+  return normalized == null ? 0 : normalized;
+}
+
 function getTargetImageIndex(node, pinKey, entries, options = {}) {
   const maxIndex = Math.max(0, entries.length - 1);
 
-  if (Number.isInteger(options?.targetIndex)) {
-    return Math.min(Math.max(0, options.targetIndex), maxIndex);
+  if (hasOwnOption(options, "targetIndex")) {
+    return normalizeNumericImageIndex(options.targetIndex, maxIndex);
   }
 
   // Default behavior: always restore per-pin index.
-  return Math.min(getStoredPinIndex(node, pinKey), maxIndex);
+  return normalizeNumericImageIndex(getStoredPinIndex(node, pinKey), maxIndex);
+}
+
+function getDisplayImageIndex(node, pinKey, entries, options = {}) {
+  const maxIndex = Math.max(0, entries.length - 1);
+
+  if (hasOwnOption(options, "displayIndex")) {
+    return normalizeDisplayImageIndex(options.displayIndex, maxIndex);
+  }
+
+  if (hasOwnOption(options, "targetIndex")) {
+    return normalizeDisplayImageIndex(options.targetIndex, maxIndex);
+  }
+
+  return normalizeDisplayImageIndex(getStoredPinIndex(node, pinKey), maxIndex);
 }
 
 function getSelectedPin(node) {
@@ -857,7 +889,14 @@ function installImageIndexTracker(node) {
   const descriptor = Object.getOwnPropertyDescriptor(node, "imageIndex");
   if (descriptor && descriptor.configurable === false) return;
 
-  let current = Number.isInteger(node.imageIndex) ? node.imageIndex : 0;
+  // ComfyUI uses explicit null imageIndex to represent the batch grid view.
+  // Undefined means no stored value yet, so default to page 0.
+  let current =
+    node.imageIndex === null
+      ? null
+      : Number.isInteger(node.imageIndex)
+        ? Math.max(0, node.imageIndex)
+        : 0;
 
   Object.defineProperty(node, "imageIndex", {
     configurable: true,
@@ -866,8 +905,7 @@ function installImageIndexTracker(node) {
       return current;
     },
     set(value) {
-      const next = Number.isInteger(value) ? value : 0;
-      current = Math.max(0, next);
+      current = value === null ? null : Number.isInteger(value) ? Math.max(0, value) : 0;
 
       const pinKey = getSelectedPin(node);
       if (pinKey && hasImagesForPin(node, pinKey)) {
@@ -885,17 +923,19 @@ function saveCurrentPinIndex(node) {
   const pinKey = getSelectedPin(node);
   if (!pinKey) return;
 
-  const index = Number.isInteger(node.imageIndex) ? node.imageIndex : 0;
-  pinImageIndexMap(node)[String(pinKey)] = Math.max(0, index);
+  const index = node.imageIndex === null ? null : Number.isInteger(node.imageIndex) ? Math.max(0, node.imageIndex) : 0;
+  pinImageIndexMap(node)[String(pinKey)] = index;
 }
 
 function getStoredPinIndex(node, pinKey) {
   const raw = pinImageIndexMap(node)[String(pinKey)];
+  if (raw === null) return null;
+  if (raw === undefined) return 0;
   return Number.isInteger(raw) ? Math.max(0, raw) : 0;
 }
 
 function setStoredPinIndex(node, pinKey, index) {
-  pinImageIndexMap(node)[String(pinKey)] = Math.max(0, Number(index) || 0);
+  pinImageIndexMap(node)[String(pinKey)] = index === null ? null : Math.max(0, Number(index) || 0);
 }
 
 function clearStoredPinIndex(node, pinKey) {
@@ -1169,18 +1209,18 @@ function prepareNodeStateForRun(node, activePinKeys) {
 
 function syncContextMenuImages(node, entries, options = {}) {
   const resetIndex = options?.resetIndex === true;
-  const hasTargetIndex = Number.isInteger(options?.targetIndex);
-  const prevIndex = Number.isInteger(node.imageIndex) ? node.imageIndex : 0;
+  const hasTargetIndex = hasOwnOption(options, "targetIndex");
+  const prevIndex = node.imageIndex === null ? null : Number.isInteger(node.imageIndex) ? node.imageIndex : 0;
   const maxIndex = Math.max(0, entries.length - 1);
 
-  // Preserve the current batch page when other pins update or when the same
-  // pin receives a new result. Reset only for explicit user pin switching.
-  // targetIndex is used for auto-follow-latest mode.
+  // Preserve the current batch page/grid state when other pins update or when
+  // the same pin receives a new result. Reset only for explicit user pin
+  // switching. targetIndex is used for auto-follow-latest mode.
   const nextIndex = hasTargetIndex
-    ? Math.min(Math.max(0, options.targetIndex), maxIndex)
+    ? normalizeDisplayImageIndex(options.targetIndex, maxIndex)
     : resetIndex
       ? 0
-      : Math.min(Math.max(0, prevIndex), maxIndex);
+      : normalizeDisplayImageIndex(prevIndex, maxIndex);
 
   const pendingEntries = entries.filter((entry) => entry && !entry.loaded && !entry.error);
 
@@ -1265,6 +1305,7 @@ function selectPin(node, pinKey, options = {}) {
   const images = normalizeImages(node.__mpPinImages?.[pinKey]);
   const entries = images.map((data, index) => makeImageEntry(node, data, index));
   const targetIndex = getTargetImageIndex(node, pinKey, entries, options);
+  const displayIndex = getDisplayImageIndex(node, pinKey, entries, options);
   const targetEntry = entries[targetIndex];
 
   mpLog("selectPin: entries prepared", {
@@ -1290,7 +1331,7 @@ function selectPin(node, pinKey, options = {}) {
       selectPin(node, pinKey, {
         ...options,
         deferUntilLoaded: false,
-        targetIndex,
+        targetIndex: displayIndex,
       });
     });
 
@@ -1309,7 +1350,7 @@ function selectPin(node, pinKey, options = {}) {
   node.__mpEntries = entries;
 
   const synced = syncContextMenuImages(node, node.__mpEntries, {
-    targetIndex,
+    targetIndex: displayIndex,
   });
 
   if (!synced) {
@@ -1550,10 +1591,15 @@ function mergeReceiverPayloadIntoStateStore(payload, liveNode = null) {
   const pinImageIndex = clonePlainObject(previousState.pinImageIndex || {});
   const nextImagesForPin = normalizeImages(pinImages[payload.pinKey]);
   const maxPayloadIndex = Math.max(0, nextImagesForPin.length - 1);
-  const existingPinIndex = Number.isInteger(pinImageIndex[payload.pinKey])
-    ? Math.max(0, pinImageIndex[payload.pinKey])
-    : 0;
-  pinImageIndex[payload.pinKey] = Math.min(existingPinIndex, maxPayloadIndex);
+  const existingPinIndex = pinImageIndex[payload.pinKey];
+  pinImageIndex[payload.pinKey] =
+    existingPinIndex === null
+      ? null
+      : existingPinIndex === undefined
+        ? 0
+        : Number.isInteger(existingPinIndex)
+          ? Math.min(Math.max(0, existingPinIndex), maxPayloadIndex)
+          : 0;
 
   const autoSwitchLatest =
     liveNode != null ? getAutoSwitchLatest(liveNode) === true : previousState.autoSwitchLatest === true;
@@ -1566,9 +1612,15 @@ function mergeReceiverPayloadIntoStateStore(payload, liveNode = null) {
       : previousSelectedPin;
 
   const selectedPinImages = normalizeImages(pinImages[nextSelectedPin]);
-  const selectedPinIndex = Number.isInteger(pinImageIndex[nextSelectedPin])
-    ? Math.max(0, pinImageIndex[nextSelectedPin])
-    : 0;
+  const selectedPinIndex = pinImageIndex[nextSelectedPin];
+  const selectedStateIndex =
+    selectedPinIndex === null
+      ? null
+      : selectedPinIndex === undefined
+        ? 0
+        : Number.isInteger(selectedPinIndex)
+          ? Math.min(Math.max(0, selectedPinIndex), Math.max(0, selectedPinImages.length - 1))
+          : 0;
 
   const nextState = {
     selectedPin: String(nextSelectedPin || payload.pinKey || "1"),
@@ -1578,7 +1630,7 @@ function mergeReceiverPayloadIntoStateStore(payload, liveNode = null) {
     connectedPinSnapshot: clonePlainObject(
       liveNode != null ? currentConnectedPinSnapshot(liveNode) : previousState.connectedPinSnapshot || []
     ),
-    imageIndex: Math.min(selectedPinIndex, Math.max(0, selectedPinImages.length - 1)),
+    imageIndex: selectedStateIndex,
     timestamp: Date.now(),
     cleared: false,
   };
@@ -1638,7 +1690,7 @@ function applyStateToLiveNode(node, state, payloadPinKey = null) {
   if (shouldDisplayNow) {
     selectPin(node, displayPin, {
       deferUntilLoaded: true,
-      targetIndex: Number.isInteger(state.imageIndex) ? state.imageIndex : undefined,
+      targetIndex: state.imageIndex === null ? null : Number.isInteger(state.imageIndex) ? state.imageIndex : undefined,
     });
   } else {
     updateButtonLabels(node);

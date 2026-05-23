@@ -310,3 +310,22 @@ state_key fallback と cache eviction の安全性修正です。
 - 新しい未ロード画像を標準 preview widget が一瞬 0x0 として描画する問題を抑制
 - 復元経路と fallback 実行経路も deferred pin selection を使うように変更
 - v1.2.22 の onRemoved cleanup 挙動は維持
+
+
+## v1.2.24
+
+バッチのグリッド表示復元修正です。
+
+- ComfyUI 標準の `node.imageIndex = null` によるグリッド表示状態を 0 ページ目へ丸めないように変更
+- 標準 preview の `X` ボタンで batch preview がグリッド表示へ戻らない問題を修正
+- pin ごとの batch page と一緒に、pin ごとの grid view 状態も保存・復元
+- v1.2.23 の 0x0 ちらつき抑制挙動は維持
+
+
+## v1.2.25
+
+デフォルト batch index の修正です。
+
+- `undefined` の imageIndex は未保存状態として扱い、デフォルトの 0 ページ目にするように変更
+- 明示的な `null` の imageIndex は ComfyUI 標準の batch grid view 状態として維持
+- 新規 / default 表示が grid 扱いになる問題を避けつつ、`X` ボタンによる grid 表示は維持

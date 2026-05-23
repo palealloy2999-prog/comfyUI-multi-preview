@@ -305,3 +305,22 @@ Note: if a future ComfyUI frontend fires `onRemoved` during workflow-tab unload 
 - Prevents ComfyUI's standard preview widget from briefly rendering newly assigned but still-unloaded images as 0x0
 - Restore and fallback execution paths now use deferred pin selection
 - Keeps the v1.2.22 onRemoved cleanup behavior
+
+
+## v1.2.24
+
+Batch grid view restoration fix.
+
+- Preserves ComfyUI's `node.imageIndex = null` grid-view state instead of coercing it to page 0
+- Fixes the standard preview `X` button not returning batch previews to grid view
+- Stores and restores grid-view state per pin together with per-pin batch page state
+- Keeps the v1.2.23 0x0 flicker guard behavior
+
+
+## v1.2.25
+
+Default batch index fix.
+
+- Treats `undefined` imageIndex as the default first page (`0`)
+- Keeps explicit `null` imageIndex as ComfyUI's batch grid-view state
+- Prevents fresh/default previews from starting in grid mode while preserving the `X` button grid behavior
