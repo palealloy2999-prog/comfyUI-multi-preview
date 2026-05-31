@@ -324,3 +324,13 @@ Default batch index fix.
 - Treats `undefined` imageIndex as the default first page (`0`)
 - Keeps explicit `null` imageIndex as ComfyUI's batch grid-view state
 - Prevents fresh/default previews from starting in grid mode while preserving the `X` button grid behavior
+
+
+## v1.2.26
+
+Safe workflow configure/reconnect input handling.
+
+- `ensureWidgets()` no longer prunes dynamic image inputs during `onNodeCreated` / `onConfigure`
+- `reconcileDynamicInputs()` now supports `allowRemove: false` for load-time safe reconciliation
+- Input pruning is limited to explicit connection-change and execution paths, avoiding link/slot corruption while LiteGraph restores workflows
+- Keeps the v1.2.25 default index/grid behavior

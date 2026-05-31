@@ -329,3 +329,13 @@ state_key fallback と cache eviction の安全性修正です。
 - `undefined` の imageIndex は未保存状態として扱い、デフォルトの 0 ページ目にするように変更
 - 明示的な `null` の imageIndex は ComfyUI 標準の batch grid view 状態として維持
 - 新規 / default 表示が grid 扱いになる問題を避けつつ、`X` ボタンによる grid 表示は維持
+
+
+## v1.2.26
+
+workflow 復元 / 再接続時の安全な input 処理です。
+
+- `onNodeCreated` / `onConfigure` 中の `ensureWidgets()` では dynamic image input を削除しないように変更
+- `reconcileDynamicInputs()` に `allowRemove: false` を追加し、読み込み中は削除を抑制
+- input 削除は明示的な接続変更時と実行時に限定し、LiteGraph の workflow 復元中に link / slot 配置が崩れるリスクを低減
+- v1.2.25 の default index / grid 挙動は維持

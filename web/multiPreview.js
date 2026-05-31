@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const VERSION = "v1.2.25";
+const VERSION = "v1.2.26";
 const NODE_NAME = "MultiPreview";
 const AUTO_NODE_NAME = "MultiPreviewAuto";
 const INTERNAL_RECEIVER_NODE_NAME = "MultiPreviewInternalReceiver";
@@ -1068,9 +1068,11 @@ function desiredInputCount(node) {
 }
 
 
-function reconcileDynamicInputs(node) {
+function reconcileDynamicInputs(node, options = {}) {
   if (!node || node.__mpReconcilingPins) return;
   node.__mpReconcilingPins = true;
+
+  const allowRemove = options?.allowRemove !== false;
 
   try {
     // Do not clear disconnected pin previews here.
@@ -1081,11 +1083,17 @@ function reconcileDynamicInputs(node) {
       ensureImageInput(node, num);
     }
 
-    const imageInputsDesc = getImageInputs(node).sort((a, b) => b.num - a.num);
-    for (const { input, num } of imageInputsDesc) {
-      if (num <= desiredCount) continue;
-      if (isInputConnected(input)) continue;
-      removeImageInput(node, num);
+    // During workflow load/reconnect, onConfigure can fire before LiteGraph has
+    // fully restored links. In that state input.link can temporarily look null,
+    // so removing inputs here may corrupt slot/link layout for the whole canvas.
+    // Only prune inputs from explicit connection-change or execution paths.
+    if (allowRemove) {
+      const imageInputsDesc = getImageInputs(node).sort((a, b) => b.num - a.num);
+      for (const { input, num } of imageInputsDesc) {
+        if (num <= desiredCount) continue;
+        if (isInputConnected(input)) continue;
+        removeImageInput(node, num);
+      }
     }
 
     ensureButtonWidgetsForPins(node);
@@ -1442,13 +1450,16 @@ function ensureButtonWidgetsForPins(node) {
   updateButtonLabels(node);
 }
 
-function ensureWidgets(node) {
+function ensureWidgets(node, options = {}) {
+  const reconcileInputs = options?.reconcileInputs === true;
+
   mpLog("ensureWidgets: start", {
     node: mpNodeLabel(node),
     selectedPin: node?.properties?.selected_pin,
     pinImageCount: countPinImages(node?.__mpPinImages || emptyPinImages()),
     entries: node?.__mpEntries?.length,
     widgetsReady: node?.__mpWidgetsReady,
+    reconcileInputs,
   });
 
   node.properties ??= {};
@@ -1477,7 +1488,9 @@ function ensureWidgets(node) {
     node.size[1] = Math.max(node.size[1] || 0, DEFAULT_NODE_HEIGHT);
   }
 
-  reconcileDynamicInputs(node);
+  if (reconcileInputs) {
+    reconcileDynamicInputs(node, { allowRemove: true });
+  }
 
   ensureAutoSwitchWidget(node);
   ensureButtonWidgetsForPins(node);
@@ -1653,7 +1666,7 @@ function applyStateToLiveNode(node, state, payloadPinKey = null) {
   if (!node || !state) return false;
 
   if (!node.__mpWidgetsReady) {
-    ensureWidgets(node);
+    ensureWidgets(node, { reconcileInputs: false });
   } else {
     ensureCoreState(node);
   }
@@ -1949,14 +1962,14 @@ app.registerExtension({
     nodeType.prototype.onNodeCreated = function (...args) {
       mpLog("lifecycle:onNodeCreated", { node: mpNodeLabel(this), args });
       const result = originalOnNodeCreated?.apply(this, args);
-      ensureWidgets(this);
+      ensureWidgets(this, { reconcileInputs: false });
       return result;
     };
 
     nodeType.prototype.onConfigure = function (...args) {
       mpLog("lifecycle:onConfigure", { node: mpNodeLabel(this), args });
       const result = originalOnConfigure?.apply(this, args);
-      ensureWidgets(this);
+      ensureWidgets(this, { reconcileInputs: false });
       return result;
     };
 
@@ -1972,7 +1985,7 @@ app.registerExtension({
       setTimeout(() => {
         this.__mpConnectionChangeScheduled = false;
 
-        reconcileDynamicInputs(this);
+        reconcileDynamicInputs(this, { allowRemove: true });
         reconcileConnectedPinIndexState(this);
 
         const selectedPin = getSelectedPin(this);
@@ -2015,7 +2028,7 @@ app.registerExtension({
       void originalOnExecuted;
       void args;
 
-      ensureWidgets(this);
+      ensureWidgets(this, { reconcileInputs: false });
       removeStandardPreviewWidgetsSoon(this);
 
       const pinImages = extractPinImages(output);
@@ -2035,7 +2048,7 @@ app.registerExtension({
         selectPin(this, selectedPin, { deferUntilLoaded: true });
       }
 
-      reconcileDynamicInputs(this);
+      reconcileDynamicInputs(this, { allowRemove: true });
       removeStandardPreviewWidgetsSoon(this);
       updateButtonLabels(this);
       requestRedraw(this);
