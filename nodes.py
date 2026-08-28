@@ -4,7 +4,7 @@ from server import PromptServer
 from nodes import PreviewImage
 
 
-VERSION = "v1.2.26"
+VERSION = "v1.2.28"
 
 # Keep this value in sync with MAX_PINS in web/multiPreview.js.
 MAX_PINS = 32
@@ -13,10 +13,10 @@ logger = logging.getLogger(__name__)
 
 
 class MultiPreview(PreviewImage):
-    """MultiPreview v1.2.26.
+    """MultiPreview v1.2.28.
 
     Parent node with dynamic image pins. During queueing, imageN dependencies
-    are replaced by injected MultiPreviewInternalReceiver nodes on the frontend.
+    are mirrored to injected MultiPreviewInternalReceiver nodes on the frontend.
     """
 
     @classmethod
@@ -30,6 +30,7 @@ class MultiPreview(PreviewImage):
             "hidden": {
                 "prompt": "PROMPT",
                 "extra_pnginfo": "EXTRA_PNGINFO",
+                "unique_id": "UNIQUE_ID",
             },
         }
 
@@ -56,9 +57,20 @@ class MultiPreview(PreviewImage):
 
         return result.get("ui", {}).get("images", [])
 
-    def preview(self, prompt=None, extra_pnginfo=None, **kwargs):
-        pin_images = {}
+    @staticmethod
+    def _has_internal_receivers(prompt, unique_id):
+        if not isinstance(prompt, dict) or unique_id is None:
+            return False
 
+        parent_id = str(unique_id)
+        return any(
+            isinstance(node, dict)
+            and node.get("class_type") == "MultiPreviewInternalReceiver"
+            and str(node.get("inputs", {}).get("parent_id")) == parent_id
+            for node in prompt.values()
+        )
+
+    def preview(self, prompt=None, extra_pnginfo=None, unique_id=None, **kwargs):
         image_items = sorted(
             (
                 (int(key[5:]), images)
@@ -68,6 +80,16 @@ class MultiPreview(PreviewImage):
             key=lambda item: item[0],
         )
 
+        if not image_items:
+            raise RuntimeError("Required input is missing: images")
+
+        # Injected receivers already saved each image for immediate display.
+        # Avoid saving the same tensors again when the parent finishes. API
+        # callers without frontend injection keep the normal preview fallback.
+        if self._has_internal_receivers(prompt, unique_id):
+            return {"ui": {"mp_version": [VERSION]}}
+
+        pin_images = {}
         for index, images in image_items:
             saved_images = self._save_pin_images(images, index, prompt, extra_pnginfo)
             if saved_images:
@@ -111,7 +133,7 @@ class MultiPreviewInternalReceiver(PreviewImage):
         return {
             "required": {
                 "image": ("IMAGE",),
-                "parent_id": ("INT", {"default": 0, "min": 0, "max": 999999999, "step": 1}),
+                "parent_id": ("STRING", {"default": ""}),
                 "pin": ("INT", {"default": 1, "min": 1, "max": MAX_PINS, "step": 1}),
                 "state_key": ("STRING", {"default": ""}),
             },
@@ -127,19 +149,24 @@ class MultiPreviewInternalReceiver(PreviewImage):
     CATEGORY = "image"
     DESCRIPTION = "Internal receiver injected by MultiPreview JS."
 
-    def receive(self, image, parent_id=0, pin=1, state_key="", prompt=None, extra_pnginfo=None):
+    def receive(self, image, parent_id="", pin=1, state_key="", prompt=None, extra_pnginfo=None):
         try:
-            parent_id = int(parent_id)
+            parent_id = str(parent_id)
             pin = int(pin)
             state_key = str(state_key or "")
         except (TypeError, ValueError):
             logger.exception("MultiPreviewInternalReceiver received invalid parent_id or pin")
             raise
 
+        if not parent_id:
+            raise ValueError("MultiPreviewInternalReceiver requires parent_id")
+
+        filename_parent_id = parent_id.replace(":", "_")
+
         try:
             result = self.save_images(
                 image,
-                filename_prefix=f"MultiPreviewInternalReceiver_parent{parent_id}_pin{pin}",
+                filename_prefix=f"MultiPreviewInternalReceiver_parent{filename_parent_id}_pin{pin}",
                 prompt=prompt,
                 extra_pnginfo=extra_pnginfo,
             )

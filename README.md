@@ -83,7 +83,7 @@ The internal receiver nodes are injected automatically and do not need to be pla
 
 ## Temporary Preview Files
 
-MultiPreview uses ComfyUI's standard temporary preview image mechanism through `PreviewImage.save_images()`.
+MultiPreview uses ComfyUI's standard temporary preview image mechanism through `PreviewImage.save_images()`. During normal browser execution, each image is saved once by its internal receiver and is not saved again by the parent node. For API execution without frontend receiver injection, the parent node retains the original preview-save fallback.
 
 This means preview files are handled in the same general way as standard ComfyUI preview nodes.
 
@@ -334,3 +334,15 @@ Safe workflow configure/reconnect input handling.
 - `reconcileDynamicInputs()` now supports `allowRemove: false` for load-time safe reconciliation
 - Input pruning is limited to explicit connection-change and execution paths, avoiding link/slot corruption while LiteGraph restores workflows
 - Keeps the v1.2.25 default index/grid behavior
+
+
+## v1.2.28
+
+Fixed duplicate temp preview saves while preserving the existing immediate-preview notification path.
+
+- Skips the parent save when injected internal receivers already saved the same images
+- Keeps the `multi_preview_receiver` event required for immediate display
+- Includes matching internal receivers in partial execution when running the parent node
+- Preserves hierarchical execution IDs and resolves parent nodes inside subgraphs
+- Removes the unavailable `beforeQueuePrompt` hook and the duplicate `graphToPrompt` patch
+- Prevents presentation-only widgets from being stored in workflow `widgets_values`

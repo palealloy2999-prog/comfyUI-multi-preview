@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const VERSION = "v1.2.26";
+const VERSION = "v1.2.28";
 const NODE_NAME = "MultiPreview";
 const AUTO_NODE_NAME = "MultiPreviewAuto";
 const INTERNAL_RECEIVER_NODE_NAME = "MultiPreviewInternalReceiver";
@@ -677,13 +677,13 @@ function normalizeCustomReceiverEvent(event) {
 
   if (!payload || typeof payload !== "object") return null;
 
-  const parentId = Number(payload.parent_id ?? payload.parentId ?? payload.parent);
+  const parentId = String(payload.parent_id ?? payload.parentId ?? payload.parent ?? "");
   const pin = Number(payload.pin ?? payload.pin_index ?? payload.pinIndex);
   const images = normalizeImages(payload.images);
   const stateKeyRaw = payload.state_key ?? payload.stateKey ?? null;
   const stateKey = typeof stateKeyRaw === "string" && stateKeyRaw ? stateKeyRaw : null;
 
-  if (!Number.isFinite(parentId) || !Number.isInteger(pin) || pin < 1 || images.length === 0) {
+  if (!parentId || !Number.isInteger(pin) || pin < 1 || images.length === 0) {
     return null;
   }
 
@@ -1400,6 +1400,9 @@ function ensureAutoSwitchWidget(node) {
   let widget = node.widgets.find((w) => w.__mpAutoSwitchWidget);
   if (widget) {
     widget.value = getAutoSwitchLatest(node);
+    widget.options ??= {};
+    widget.options.serialize = false;
+    widget.serializeValue = () => undefined;
     return;
   }
 
@@ -1414,6 +1417,9 @@ function ensureAutoSwitchWidget(node) {
     {}
   );
   widget.__mpAutoSwitchWidget = true;
+  widget.options ??= {};
+  widget.options.serialize = false;
+  widget.serializeValue = () => undefined;
 }
 
 function ensureButtonWidgetsForPins(node) {
@@ -1434,10 +1440,18 @@ function ensureButtonWidgetsForPins(node) {
 
   for (const pinKey of validPins) {
     const existing = node.widgets.find((widget) => String(widget.__mpPinKey) === pinKey);
-    if (existing) continue;
+    if (existing) {
+      existing.options ??= {};
+      existing.options.serialize = false;
+      existing.serializeValue = () => undefined;
+      continue;
+    }
 
     const widget = node.addWidget("button", pinKey, pinKey, () => selectPin(node, pinKey, { deferUntilLoaded: true }), {});
     widget.__mpPinKey = pinKey;
+    widget.options ??= {};
+    widget.options.serialize = false;
+    widget.serializeValue = () => undefined;
   }
 
   const nonPinWidgets = node.widgets.filter((widget) => !widget.__mpPinKey);
@@ -1550,6 +1564,29 @@ function findNodeById(id) {
   const wanted = String(id);
   const numericId = Number(id);
   const graphs = candidateGraphs();
+
+  const executionPath = wanted.split(":").filter(Boolean);
+  if (executionPath.length > 1 && app?.rootGraph) {
+    let graph = app.rootGraph;
+
+    for (const subgraphNodeId of executionPath.slice(0, -1)) {
+      const subgraphNode = graph.getNodeById?.(subgraphNodeId) ?? graph.getNodeById?.(Number(subgraphNodeId));
+      if (!subgraphNode?.isSubgraphNode?.() || !subgraphNode.subgraph) {
+        graph = null;
+        break;
+      }
+      graph = subgraphNode.subgraph;
+    }
+
+    if (graph) {
+      const localId = executionPath[executionPath.length - 1];
+      const node = graph.getNodeById?.(localId) ?? graph.getNodeById?.(Number(localId));
+      if (node) {
+        mpLog("findNodeById: found by execution path", { id, node: mpNodeLabel(node) });
+        return node;
+      }
+    }
+  }
 
   mpLog("findNodeById: start", {
     id,
@@ -1766,8 +1803,6 @@ function registerCustomReceiverEventListener() {
   api.__mpCustomReceiverListenerRegistered = true;
 }
 
-const injectedPromptObjects = new WeakSet();
-
 function isPromptNodeObject(value) {
   return !!value && typeof value === "object" && typeof value.class_type === "string";
 }
@@ -1777,12 +1812,6 @@ function getPromptOutputFromQueueArgs(args) {
   if (args?.[1]?.prompt && typeof args[1].prompt === "object") return args[1].prompt;
   if (args?.[0]?.output && typeof args[0].output === "object") return args[0].output;
   if (args?.[0]?.prompt && typeof args[0].prompt === "object") return args[0].prompt;
-  return null;
-}
-
-function getPromptOutputFromGraphToPromptResult(result) {
-  if (result?.output && typeof result.output === "object") return result.output;
-  if (result?.prompt && typeof result.prompt === "object") return result.prompt;
   return null;
 }
 
@@ -1834,24 +1863,22 @@ function connectedImageInputsFromLiveNode(nodeId, promptNode) {
 }
 
 
-function promptAlreadyHasInternalReceiver(prompt, parentId, pin) {
-  for (const node of Object.values(prompt || {})) {
+function internalReceiverId(prompt, parentId, pin) {
+  for (const [nodeId, node] of Object.entries(prompt || {})) {
     if (!isPromptNodeObject(node)) continue;
     if (node.class_type !== INTERNAL_RECEIVER_NODE_NAME) continue;
-    if (Number(node.inputs?.parent_id) === Number(parentId) && Number(node.inputs?.pin) === Number(pin)) {
-      return true;
+    if (String(node.inputs?.parent_id) === String(parentId) && Number(node.inputs?.pin) === Number(pin)) {
+      return String(nodeId);
     }
   }
-  return false;
+  return null;
 }
 
 function injectInternalReceiversIntoPrompt(prompt) {
-  if (!prompt || typeof prompt !== "object") return 0;
-  if (injectedPromptObjects.has(prompt)) return 0;
-  injectedPromptObjects.add(prompt);
+  if (!prompt || typeof prompt !== "object") return [];
 
   let nextId = nextPromptNodeId(prompt);
-  let injectedCount = 0;
+  const receivers = [];
 
   for (const [nodeId, node] of Object.entries(prompt)) {
     if (!isPromptNodeObject(node)) continue;
@@ -1874,13 +1901,17 @@ function injectInternalReceiversIntoPrompt(prompt) {
     }
 
     for (const { pin, linkValue } of connectedPins) {
-      if (promptAlreadyHasInternalReceiver(prompt, nodeId, pin)) continue;
+      const existingReceiverId = internalReceiverId(prompt, nodeId, pin);
+      if (existingReceiverId) {
+        receivers.push({ receiverId: existingReceiverId, parentId: String(nodeId) });
+        continue;
+      }
 
       const receiverId = String(nextId++);
       prompt[receiverId] = {
         inputs: {
           image: cloneLinkValue(linkValue),
-          parent_id: Number(nodeId),
+          parent_id: String(nodeId),
           pin,
           state_key: stateKey || "",
         },
@@ -1890,50 +1921,46 @@ function injectInternalReceiversIntoPrompt(prompt) {
         },
       };
 
-      injectedCount += 1;
+      receivers.push({ receiverId, parentId: String(nodeId) });
     }
 
-    // Keep imageN dependencies on the parent prompt node as a fallback.
-    // Internal receivers provide immediate updates, while the parent node can
-    // still execute normally for node-run-button and API-style execution paths.
+    // Keep imageN dependencies on the parent prompt node so it remains a normal
+    // terminal node. The parent detects these receivers and skips duplicate
+    // temp saves; API callers without frontend injection use its save fallback.
   }
 
-  return injectedCount;
+  return receivers;
 }
 
 function patchQueuePromptOnce() {
-  // Use multiple hook points because ComfyUI frontend versions and execution
-  // paths differ between normal queueing, node execution, and serialized prompt
-  // generation. injectedPromptObjects prevents duplicate injection for the same
-  // prompt object when more than one hook fires.
   if (api && typeof api.queuePrompt === "function" && !api.__mpQueuePromptPatched) {
     const originalApiQueuePrompt = api.queuePrompt.bind(api);
 
     api.queuePrompt = async function (...args) {
       const output = getPromptOutputFromQueueArgs(args);
-      injectInternalReceiversIntoPrompt(output);
+      const receivers = injectInternalReceiversIntoPrompt(output);
+      const options = args?.[2];
+      const partialTargets = options?.partialExecutionTargets;
+
+      if (Array.isArray(partialTargets) && receivers.length > 0) {
+        const targetIds = new Set(partialTargets.map((id) => String(id)));
+        const receiverTargets = receivers
+          .filter(({ parentId }) => targetIds.has(parentId))
+          .map(({ receiverId }) => receiverId);
+
+        if (receiverTargets.length > 0) {
+          args[2] = {
+            ...options,
+            partialExecutionTargets: [...partialTargets, ...receiverTargets],
+          };
+        }
+      }
+
       return originalApiQueuePrompt(...args);
     };
 
     api.__mpQueuePromptPatched = true;
   }
-
-  if (app && typeof app.graphToPrompt === "function" && !app.__mpGraphToPromptPatched) {
-    const originalGraphToPrompt = app.graphToPrompt.bind(app);
-
-    app.graphToPrompt = async function (...args) {
-      const result = await originalGraphToPrompt(...args);
-      const output = getPromptOutputFromGraphToPromptResult(result);
-      injectInternalReceiversIntoPrompt(output);
-      return result;
-    };
-
-    app.__mpGraphToPromptPatched = true;
-  }
-}
-
-async function beforeQueuePromptHook(workflow, output) {
-  injectInternalReceiversIntoPrompt(output);
 }
 
 app.registerExtension({
@@ -1944,10 +1971,6 @@ app.registerExtension({
     patchQueuePromptOnce();
     registerCustomReceiverEventListener();
     registerStatePersistence();
-  },
-
-  async beforeQueuePrompt(workflow, output) {
-    await beforeQueuePromptHook(workflow, output);
   },
 
   async beforeRegisterNodeDef(nodeType, nodeData) {

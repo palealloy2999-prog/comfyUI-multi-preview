@@ -98,7 +98,7 @@ MultiPreview は、実行中に内部レシーバーノードを使用して、�
 
 ## 一時プレビューファイルについて
 
-MultiPreview は、ComfyUI 標準の一時プレビュー画像保存機構である `PreviewImage.save_images()` を使用しています。
+MultiPreview は、ComfyUI 標準の一時プレビュー画像保存機構である `PreviewImage.save_images()` を使用しています。通常のブラウザ実行では内部レシーバーが各画像を1回だけ保存し、親ノードによる同一画像の再保存は行いません。フロントエンドによるレシーバー注入がない API 実行では、親ノードが従来どおりプレビューを保存します。
 
 そのため、プレビュー画像ファイルは標準の ComfyUI プレビューノードと同様の仕組みで扱われます。
 
@@ -339,3 +339,15 @@ workflow 復元 / 再接続時の安全な input 処理です。
 - `reconcileDynamicInputs()` に `allowRemove: false` を追加し、読み込み中は削除を抑制
 - input 削除は明示的な接続変更時と実行時に限定し、LiteGraph の workflow 復元中に link / slot 配置が崩れるリスクを低減
 - v1.2.25 の default index / grid 挙動は維持
+
+
+## v1.2.28
+
+temp プレビューの二重保存を修正し、従来の即時プレビュー通知経路を維持しました。
+
+- 内部レシーバーが注入された実行では、親ノードによる同一画像の再保存を省略
+- 即時表示に必要な `multi_preview_receiver` イベントを維持
+- ノード単体実行時には対応する内部レシーバーも partial execution 対象へ追加
+- 階層化された実行 ID を文字列のまま扱い、サブグラフ内の親ノードを解決
+- 存在しない `beforeQueuePrompt` hook と重複していた `graphToPrompt` patch を削除
+- 表示専用ウィジェットを workflow の `widgets_values` に保存しないよう修正
