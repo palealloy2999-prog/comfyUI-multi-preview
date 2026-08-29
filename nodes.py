@@ -4,7 +4,7 @@ from server import PromptServer
 from nodes import PreviewImage
 
 
-VERSION = "v1.2.28"
+VERSION = "v1.2.29"
 
 # Keep this value in sync with MAX_PINS in web/multiPreview.js.
 MAX_PINS = 32
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class MultiPreview(PreviewImage):
-    """MultiPreview v1.2.28.
+    """MultiPreview v1.2.29.
 
     Parent node with dynamic image pins. During queueing, imageN dependencies
     are mirrored to injected MultiPreviewInternalReceiver nodes on the frontend.

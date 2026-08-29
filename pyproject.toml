@@ -1,8 +1,8 @@
 [project]
 name = "multi-preview"
-version = "1.2.28"
+version = "1.2.29"
 description = "Live multi-input image preview nodes for ComfyUI."
-license = { file = "LICENSE" }
+license = { text = "MIT License" }
 requires-python = ">=3.10"
 dependencies = []
 classifiers = [
@@ -17,3 +17,4 @@ Issues = "https://github.com/palealloy2999-prog/comfyUI-multi-preview/issues"
 [tool.comfy]
 PublisherId = "palealloy"
 DisplayName = "MultiPreview"
+Icon = "https://avatars.githubusercontent.com/u/230474078?s=400&v=4"
